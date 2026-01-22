@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec, Map, i128};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Vec, Map};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,18 +31,18 @@ pub struct AttestationEngineContract;
 #[contractimpl]
 impl AttestationEngineContract {
     /// Initialize the attestation engine
-    pub fn initialize(e: Env, admin: Address, commitment_core: Address) {
+    pub fn initialize(_e: Env, _admin: Address, _commitment_core: Address) {
         // TODO: Store admin and commitment core contract address
         // TODO: Initialize storage
     }
 
     /// Record an attestation for a commitment
     pub fn attest(
-        e: Env,
-        commitment_id: String,
-        attestation_type: String,
-        data: Map<String, String>,
-        verified_by: Address,
+        _e: Env,
+        _commitment_id: String,
+        _attestation_type: String,
+        _data: Map<String, String>,
+        _verified_by: Address,
     ) {
         // TODO: Verify caller is authorized
         // TODO: Create attestation record
@@ -52,13 +52,13 @@ impl AttestationEngineContract {
     }
 
     /// Get all attestations for a commitment
-    pub fn get_attestations(e: Env, commitment_id: String) -> Vec<Attestation> {
+    pub fn get_attestations(e: Env, _commitment_id: String) -> Vec<Attestation> {
         // TODO: Retrieve all attestations for commitment
         Vec::new(&e)
     }
 
     /// Get current health metrics for a commitment
-    pub fn get_health_metrics(e: Env, commitment_id: String) -> HealthMetrics {
+    pub fn get_health_metrics(e: Env, _commitment_id: String) -> HealthMetrics {
         // TODO: Calculate and return health metrics
         HealthMetrics {
             commitment_id: String::from_str(&e, "placeholder"),
@@ -73,7 +73,7 @@ impl AttestationEngineContract {
     }
 
     /// Verify commitment compliance
-    pub fn verify_compliance(e: Env, commitment_id: String) -> bool {
+    pub fn verify_compliance(_e: Env, _commitment_id: String) -> bool {
         // TODO: Get commitment rules from core contract
         // TODO: Get current health metrics
         // TODO: Check if rules are being followed
@@ -82,14 +82,14 @@ impl AttestationEngineContract {
     }
 
     /// Record fee generation
-    pub fn record_fees(e: Env, commitment_id: String, fee_amount: i128) {
+    pub fn record_fees(_e: Env, _commitment_id: String, _fee_amount: i128) {
         // TODO: Update fees_generated in health metrics
         // TODO: Create fee attestation
         // TODO: Emit fee event
     }
 
     /// Record drawdown event
-    pub fn record_drawdown(e: Env, commitment_id: String, drawdown_percent: i128) {
+    pub fn record_drawdown(_e: Env, _commitment_id: String, _drawdown_percent: i128) {
         // TODO: Update drawdown_percent in health metrics
         // TODO: Check if max_loss_percent is exceeded
         // TODO: Create drawdown attestation
@@ -97,7 +97,7 @@ impl AttestationEngineContract {
     }
 
     /// Calculate compliance score (0-100)
-    pub fn calculate_compliance_score(e: Env, commitment_id: String) -> u32 {
+    pub fn calculate_compliance_score(_e: Env, _commitment_id: String) -> u32 {
         // TODO: Get all attestations
         // TODO: Calculate score based on:
         //   - Rule violations

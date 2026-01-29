@@ -4,6 +4,7 @@
     "nonce": 0
   },
   "auth": [
+<<<<<<< HEAD
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
@@ -27,6 +28,8 @@
       ]
     ],
     [],
+=======
+>>>>>>> 6495fd254500e4d6d4a43b6bb7acddba03492440
     []
   ],
   "ledger": {
@@ -43,6 +46,7 @@
         {
           "contract_data": {
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+<<<<<<< HEAD
             "key": {
               "ledger_key_nonce": {
                 "nonce": 801925984706572462
@@ -76,6 +80,8 @@
         {
           "contract_data": {
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+=======
+>>>>>>> 6495fd254500e4d6d4a43b6bb7acddba03492440
             "key": "ledger_key_contract_instance",
             "durability": "persistent"
           }
@@ -86,7 +92,11 @@
             "data": {
               "contract_data": {
                 "ext": "v0",
+<<<<<<< HEAD
                 "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+=======
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+>>>>>>> 6495fd254500e4d6d4a43b6bb7acddba03492440
                 "key": "ledger_key_contract_instance",
                 "durability": "persistent",
                 "val": {
@@ -97,6 +107,7 @@
                     "storage": [
                       {
                         "key": {
+<<<<<<< HEAD
                           "symbol": "ADMIN"
                         },
                         "val": {
@@ -114,10 +125,59 @@
                       {
                         "key": {
                           "symbol": "NFT"
+=======
+                          "vec": [
+                            {
+                              "symbol": "Admin"
+                            }
+                          ]
+>>>>>>> 6495fd254500e4d6d4a43b6bb7acddba03492440
                         },
                         "val": {
                           "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                         }
+<<<<<<< HEAD
+=======
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "NftContract"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "TotalCommitments"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "TotalValueLocked"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 0
+                          }
+                        }
+>>>>>>> 6495fd254500e4d6d4a43b6bb7acddba03492440
                       }
                     ]
                   }
@@ -152,6 +212,7 @@
       ]
     ]
   },
+<<<<<<< HEAD
   "events": [
     {
       "event": {
@@ -208,4 +269,7 @@
       "failed_call": false
     }
   ]
+=======
+  "events": []
+>>>>>>> 6495fd254500e4d6d4a43b6bb7acddba03492440
 }

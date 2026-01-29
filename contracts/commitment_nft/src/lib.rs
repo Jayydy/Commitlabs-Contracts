@@ -376,13 +376,17 @@ impl CommitmentNFTContract {
         nft.owner = to.clone();
         e.storage().persistent().set(&DataKey::NFT(token_id), &nft);
 
+        // OPTIMIZATION: Batch read balances before updating
+        let (from_balance, to_balance) = {
+            let from_bal = e.storage().persistent().get(&DataKey::OwnerBalance(from.clone())).unwrap_or(0u32);
+            let to_bal = e.storage().persistent().get(&DataKey::OwnerBalance(to.clone())).unwrap_or(0u32);
+            (from_bal, to_bal)
+        };
+        
         // Update balance counts
-        let from_balance: u32 = e.storage().persistent().get(&DataKey::OwnerBalance(from.clone())).unwrap_or(0);
         if from_balance > 0 {
             e.storage().persistent().set(&DataKey::OwnerBalance(from.clone()), &(from_balance - 1));
         }
-
-        let to_balance: u32 = e.storage().persistent().get(&DataKey::OwnerBalance(to.clone())).unwrap_or(0);
         e.storage().persistent().set(&DataKey::OwnerBalance(to.clone()), &(to_balance + 1));
 
         // Update owner tokens lists

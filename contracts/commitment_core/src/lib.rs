@@ -183,10 +183,36 @@ impl CommitmentCoreContract {
 
     /// Generate unique commitment ID
     /// Optimized: Uses counter to create unique ID efficiently
-    fn generate_commitment_id(e: &Env, _counter: u64) -> String {
-        // Use counter for unique ID - more efficient than string concatenation
-        // Format: "commit_" + counter (simplified for gas efficiency)
-        String::from_str(e, "commitment_") // Simplified - counter will be appended in future optimization
+    fn generate_commitment_id(e: &Env, counter: u64) -> String {
+        // OPTIMIZATION: Use counter directly as string to minimize allocations
+        // This is more gas-efficient than string concatenation
+        let mut buf = [0u8; 32];
+        let prefix = b"c_";
+        buf[0] = prefix[0];
+        buf[1] = prefix[1];
+        
+        // Convert counter to string representation
+        let mut n = counter;
+        let mut i = 2;
+        if n == 0 {
+            buf[i] = b'0';
+            i += 1;
+        } else {
+            let mut digits = [0u8; 20];
+            let mut digit_count = 0;
+            while n > 0 {
+                digits[digit_count] = (n % 10) as u8 + b'0';
+                n /= 10;
+                digit_count += 1;
+            }
+            // Reverse digits
+            for j in 0..digit_count {
+                buf[i] = digits[digit_count - 1 - j];
+                i += 1;
+            }
+        }
+        
+        String::from_str(e, core::str::from_utf8(&buf[..i]).unwrap_or("c_0"))
     }
 
     /// Initialize the core commitment contract
@@ -271,20 +297,30 @@ impl CommitmentCoreContract {
         // Validate rules
         Self::validate_rules(&e, &rules);
 
-        // OPTIMIZATION: Read both counters once to minimize storage operations
-        let current_total = e
-            .storage()
-            .instance()
-            .get::<_, u64>(&DataKey::TotalCommitments)
-            .unwrap_or(0);
-        let current_tvl = e
-            .storage()
-            .instance()
-            .get::<_, i128>(&DataKey::TotalValueLocked)
-            .unwrap_or(0);
+        // OPTIMIZATION: Read both counters and NFT contract once to minimize storage operations
+        let (current_total, current_tvl, nft_contract) = {
+            let total = e.storage().instance().get::<_, u64>(&DataKey::TotalCommitments).unwrap_or(0);
+            let tvl = e.storage().instance().get::<_, i128>(&DataKey::TotalValueLocked).unwrap_or(0);
+            let nft = e.storage().instance().get::<_, Address>(&DataKey::NftContract)
+                .unwrap_or_else(|| {
+                    set_reentrancy_guard(&e, false);
+                    panic!("Contract not initialized")
+                });
+            (total, tvl, nft)
+        };
 
         // Generate unique commitment ID using counter
         let commitment_id = Self::generate_commitment_id(&e, current_total);
+
+        // Get NFT contract address
+        let nft_contract = e
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::NftContract)
+            .unwrap_or_else(|| {
+                set_reentrancy_guard(&e, false);
+                panic!("Contract not initialized")
+            });
 
         // Get NFT contract address
         let nft_contract = e

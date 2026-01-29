@@ -416,37 +416,36 @@ impl AttestationEngineContract {
         e.storage().persistent().set(&key, &metrics);
     }
 
-    /// Parse i128 from String (simple implementation)
+    /// Parse i128 from String (optimized implementation)
     fn parse_i128_from_string(_e: &Env, s: &String) -> Option<i128> {
         let len = s.len();
-        if len == 0 {
-            return None;
+        if len == 0 || len > 64 {
+            return None; // Early return for invalid lengths
         }
 
         // Copy string to buffer
         let mut buf = [0u8; 64];
-        if len > 64 {
-            return None; // Too long
-        }
         s.copy_into_slice(&mut buf[..len as usize]);
 
         let mut result: i128 = 0;
-        let mut is_negative = false;
         let mut start_idx = 0;
-
-        if buf[0] == b'-' {
-            is_negative = true;
+        let is_negative = buf[0] == b'-';
+        
+        if is_negative {
             start_idx = 1;
+            if len == 1 {
+                return None; // Just a minus sign
+            }
         }
 
+        // OPTIMIZATION: Single pass parsing with early exit on invalid char
         for i in start_idx..len as usize {
             let b = buf[i];
-            if b >= b'0' && b <= b'9' {
-                result = result.checked_mul(10)?;
-                result = result.checked_add((b - b'0') as i128)?;
-            } else {
-                return None; // Invalid character
+            if b < b'0' || b > b'9' {
+                return None; // Invalid character - early exit
             }
+            result = result.checked_mul(10)?;
+            result = result.checked_add((b - b'0') as i128)?;
         }
 
         if is_negative {
@@ -560,39 +559,26 @@ impl AttestationEngineContract {
             .unwrap_or(0);
         e.storage().persistent().set(&counter_key, &(counter + 1));
 
-        // 11b. Update global analytics counters
-        let total_attestations: u64 = e
-            .storage()
-            .instance()
-            .get(&DataKey::TotalAttestations)
-            .unwrap_or(0);
-        e.storage()
-            .instance()
-            .set(&DataKey::TotalAttestations, &(total_attestations + 1));
-
+        // 11b. OPTIMIZATION: Batch update all analytics counters
+        let (total_attestations, total_violations, verifier_count) = {
+            let total_att = e.storage().instance().get(&DataKey::TotalAttestations).unwrap_or(0u64);
+            let total_viol = e.storage().instance().get(&DataKey::TotalViolations).unwrap_or(0u64);
+            let verifier_key = DataKey::VerifierAttestationCount(caller.clone());
+            let ver_count = e.storage().instance().get(&verifier_key).unwrap_or(0u64);
+            (total_att, total_viol, ver_count)
+        };
+        
+        e.storage().instance().set(&DataKey::TotalAttestations, &(total_attestations + 1));
+        
         // Track violations (explicit or non-compliant)
         let violation_type = String::from_str(&e, "violation");
         if attestation.attestation_type == violation_type || !attestation.is_compliant {
-            let total_violations: u64 = e
-                .storage()
-                .instance()
-                .get(&DataKey::TotalViolations)
-                .unwrap_or(0);
-            e.storage()
-                .instance()
-                .set(&DataKey::TotalViolations, &(total_violations + 1));
+            e.storage().instance().set(&DataKey::TotalViolations, &(total_violations + 1));
         }
 
         // Track per-verifier attestation count
         let verifier_key = DataKey::VerifierAttestationCount(caller.clone());
-        let verifier_count: u64 = e
-            .storage()
-            .instance()
-            .get(&verifier_key)
-            .unwrap_or(0);
-        e.storage()
-            .instance()
-            .set(&verifier_key, &(verifier_count + 1));
+        e.storage().instance().set(&verifier_key, &(verifier_count + 1));
 
         // 12. Emit enhanced AttestationRecorded event
         e.events().publish(

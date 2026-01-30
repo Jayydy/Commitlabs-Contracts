@@ -146,7 +146,6 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::Address as TestAddress;
     use soroban_sdk::{contract, contractimpl};
 
     // Dummy contract used to provide a valid contract context for storage access

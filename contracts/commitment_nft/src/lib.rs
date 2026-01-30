@@ -1,4 +1,5 @@
 #![no_std]
+use shared_utils::EmergencyControl;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, String,
     Symbol, Vec,
@@ -98,7 +99,6 @@ pub enum DataKey {
 }
 
 // Events
-const MINT: soroban_sdk::Symbol = symbol_short!("mint");
 
 #[cfg(test)]
 mod tests;
@@ -221,6 +221,7 @@ impl CommitmentNFTContract {
             return Err(ContractError::ReentrancyDetected);
         }
         e.storage().instance().set(&DataKey::ReentrancyGuard, &true);
+        EmergencyControl::require_not_emergency(&e);
 
         // CHECKS: Verify contract is initialized
         if !e.storage().instance().has(&DataKey::Admin) {
@@ -387,6 +388,7 @@ impl CommitmentNFTContract {
             return Err(ContractError::ReentrancyDetected);
         }
         e.storage().instance().set(&DataKey::ReentrancyGuard, &true);
+        EmergencyControl::require_not_emergency(&e);
 
         // CHECKS: Require authorization from the sender
         from.require_auth();
@@ -424,23 +426,27 @@ impl CommitmentNFTContract {
         nft.owner = to.clone();
         e.storage().persistent().set(&DataKey::NFT(token_id), &nft);
 
+        // OPTIMIZATION: Batch read balances before updating
+        let (from_balance, to_balance) = {
+            let from_bal = e
+                .storage()
+                .persistent()
+                .get(&DataKey::OwnerBalance(from.clone()))
+                .unwrap_or(0u32);
+            let to_bal = e
+                .storage()
+                .persistent()
+                .get(&DataKey::OwnerBalance(to.clone()))
+                .unwrap_or(0u32);
+            (from_bal, to_bal)
+        };
+
         // Update balance counts
-        let from_balance: u32 = e
-            .storage()
-            .persistent()
-            .get(&DataKey::OwnerBalance(from.clone()))
-            .unwrap_or(0);
         if from_balance > 0 {
             e.storage()
                 .persistent()
                 .set(&DataKey::OwnerBalance(from.clone()), &(from_balance - 1));
         }
-
-        let to_balance: u32 = e
-            .storage()
-            .persistent()
-            .get(&DataKey::OwnerBalance(to.clone()))
-            .unwrap_or(0);
         e.storage()
             .persistent()
             .set(&DataKey::OwnerBalance(to.clone()), &(to_balance + 1));
@@ -576,6 +582,7 @@ impl CommitmentNFTContract {
             return Err(ContractError::ReentrancyDetected);
         }
         e.storage().instance().set(&DataKey::ReentrancyGuard, &true);
+        EmergencyControl::require_not_emergency(&e);
 
         // CHECKS: Get the NFT
         let mut nft: CommitmentNFT = e
@@ -638,6 +645,23 @@ impl CommitmentNFTContract {
     /// Check if a token exists
     pub fn token_exists(e: Env, token_id: u32) -> bool {
         e.storage().persistent().has(&DataKey::NFT(token_id))
+    }
+
+    /// Set emergency mode (admin only)
+    pub fn set_emergency_mode(e: Env, caller: Address, enabled: bool) -> Result<(), ContractError> {
+        let admin: Address = e
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+        admin.require_auth();
+
+        if caller != admin {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        EmergencyControl::set_emergency_mode(&e, enabled);
+        Ok(())
     }
 }
 

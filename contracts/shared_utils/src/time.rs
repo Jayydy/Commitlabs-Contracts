@@ -92,11 +92,7 @@ impl TimeUtils {
     /// Time remaining in seconds (0 if expired)
     pub fn time_remaining(e: &Env, expiration: u64) -> u64 {
         let current_time = Self::now(e);
-        if current_time >= expiration {
-            0
-        } else {
-            expiration - current_time
-        }
+        expiration.saturating_sub(current_time)
     }
 
     /// Calculate elapsed time since a timestamp
@@ -109,11 +105,7 @@ impl TimeUtils {
     /// Elapsed time in seconds
     pub fn elapsed(e: &Env, start_time: u64) -> u64 {
         let current_time = Self::now(e);
-        if current_time < start_time {
-            0
-        } else {
-            current_time - start_time
-        }
+        current_time.saturating_sub(start_time)
     }
 
     /// Convert seconds to days (rounded down)

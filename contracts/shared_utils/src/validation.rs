@@ -67,7 +67,7 @@ impl Validation {
     /// # Panics
     /// Panics if the string is empty
     pub fn require_non_empty_string(value: &String, field_name: &str) {
-        if value.len() == 0 {
+        if value.is_empty() {
             panic!("Invalid {}: must not be empty", field_name);
         }
     }

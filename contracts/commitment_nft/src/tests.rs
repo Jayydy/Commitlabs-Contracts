@@ -551,7 +551,7 @@ fn test_get_nfts_by_owner() {
 
 #[test]
 fn test_owner_of_not_found() {
-    let (e, contract_id, admin) = setup_env();
+    let (e, contract_id, _admin) = setup_env();
     let client = CommitmentNFTContractClient::new(&e, &contract_id);
 
     let result = client.try_owner_of(&999);

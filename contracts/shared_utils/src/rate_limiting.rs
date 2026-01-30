@@ -12,7 +12,7 @@
 //! - (RL_STATE, address, function_symbol) -> (window_start: u64, count: u32)
 //! - (RL_EX, address) -> bool
 
-use soroban_sdk::{symbol_short, Address, Env, Symbol};
+use soroban_sdk::{Address, Env, Symbol};
 
 use crate::time::TimeUtils;
 
@@ -129,9 +129,9 @@ impl RateLimiter {
 mod tests {
     use super::*;
     use soroban_sdk::{
-        contract, contractimpl,
+        contract, contractimpl, symbol_short,
         testutils::{Address as TestAddress, Ledger},
-        Address, Env,
+        Address, Env, Symbol,
     };
 
     #[contract]

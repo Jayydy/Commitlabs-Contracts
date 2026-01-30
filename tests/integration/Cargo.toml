@@ -1,0 +1,25 @@
+[package]
+name = "integration_tests"
+version = "0.1.0"
+edition = "2021"
+
+# This is a test-only package - not a deployable contract
+# It should only be built for native targets (not wasm)
+# This package is excluded from the workspace (see root Cargo.toml exclude)
+
+[dev-dependencies]
+# Use the same soroban-sdk version as the contracts
+soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+commitment_nft = { path = "../../contracts/commitment_nft" }
+commitment_core = { path = "../../contracts/commitment_core" }
+attestation_engine = { path = "../../contracts/attestation_engine" }
+price_oracle = { path = "../../contracts/price_oracle" }
+
+[lib]
+crate-type = ["rlib"]
+path = "src/lib.rs"
+doctest = false
+
+[[test]]
+name = "integration"
+path = "src/lib.rs"

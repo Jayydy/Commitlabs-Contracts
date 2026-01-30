@@ -14,6 +14,8 @@
 //! - Rate limiting helpers
 
 pub mod access_control;
+pub mod emergency;
+pub mod error_codes;
 pub mod errors;
 pub mod events;
 pub mod math;
@@ -27,10 +29,12 @@ mod tests;
 
 // Re-export commonly used items
 pub use access_control::*;
+pub use emergency::EmergencyControl;
+pub use error_codes::*;
 pub use errors::*;
 pub use events::*;
 pub use math::*;
 pub use rate_limiting::*;
-pub use storage::*;
+pub use storage::Storage;
 pub use time::*;
 pub use validation::*;

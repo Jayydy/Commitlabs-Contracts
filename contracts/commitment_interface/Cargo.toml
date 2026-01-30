@@ -1,0 +1,17 @@
+[package]
+name = "commitment_interface"
+version = "0.1.0"
+edition = "2021" # Changed to 2021 to match your other contracts for consistency
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+testutils = ["soroban-sdk/testutils"]
+default = []
+
+[dependencies]
+soroban-sdk = "21.0.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "21.0.0", features = ["testutils"] }

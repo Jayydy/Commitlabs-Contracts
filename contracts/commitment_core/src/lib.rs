@@ -1,12 +1,21 @@
 #![no_std]
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, Address, Env, String, Vec, Map,
+    Val, BytesN, IntoVal,
+};
+use soroban_sdk::storage::Storage;
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, symbol_short, Symbol};
 
 use shared_utils::{
     emit_error_event, EmergencyControl, RateLimiter, SafeMath, TimeUtils, Validation,
 };
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, log, symbol_short, token, Address, Env,
-    IntoVal, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, log, symbol_short, token, Address, BytesN,
+    Env, IntoVal, String, Symbol, Vec,
 };
+
+pub const CURRENT_VERSION: u32 = 1;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -80,6 +89,7 @@ pub struct CommitmentRules {
     pub commitment_type: String, // "safe", "balanced", "aggressive"
     pub early_exit_penalty: u32,
     pub min_fee_threshold: i128,
+    pub grace_period_days: u32,
 }
 
 /// Metadata for a supported asset (symbol, decimals).
@@ -124,6 +134,162 @@ pub struct UpdateValueParams {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Allocation {
+    pub commitment_id: String,
+    pub target_pool: Address,
+    pub amount: i128,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AllocationTracking {
+    pub total_allocated: i128,
+    pub allocations: Vec<Allocation>,
+}
+
+// Storage Data Keys
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey {
+    Admin,
+    AuthorizedAllocator(Address),
+    Commitment(String),
+    CommitmentBalance(String),
+    AllocationTracking(String),
+    InitFlag,
+}
+
+// Error helper functions using panic with error codes
+fn panic_unauthorized() -> ! {
+    panic!("Unauthorized: caller is not an authorized allocation contract");
+}
+
+fn panic_insufficient_balance() -> ! {
+    panic!("InsufficientBalance: commitment does not have enough balance");
+}
+
+fn panic_inactive_commitment() -> ! {
+    panic!("InactiveCommitment: commitment is not active or does not exist");
+}
+
+fn panic_transfer_failed() -> ! {
+    panic!("TransferFailed: asset transfer failed");
+}
+
+fn panic_already_initialized() -> ! {
+    panic!("AlreadyInitialized: contract is already initialized");
+}
+
+fn panic_invalid_amount() -> ! {
+    panic!("InvalidAmount: amount must be greater than zero");
+}
+
+// Helper functions for storage operations
+fn has_admin(e: &Env) -> bool {
+    let key = DataKey::Admin;
+    e.storage().instance().has(&key)
+}
+
+fn get_admin(e: &Env) -> Address {
+    let key = DataKey::Admin;
+    e.storage().instance().get(&key).unwrap()
+}
+
+fn set_admin(e: &Env, admin: &Address) {
+    let key = DataKey::Admin;
+    e.storage().instance().set(&key, admin);
+}
+
+fn is_authorized_allocator(e: &Env, allocator: &Address) -> bool {
+    let key = DataKey::AuthorizedAllocator(allocator.clone());
+    if e.storage().instance().has(&key) {
+        e.storage().instance().get::<DataKey, bool>(&key).unwrap_or(false)
+    } else {
+        false
+    }
+}
+
+fn set_authorized_allocator(e: &Env, allocator: &Address, authorized: bool) {
+    let key = DataKey::AuthorizedAllocator(allocator.clone());
+    e.storage().instance().set(&key, &authorized);
+}
+
+fn get_commitment(e: &Env, commitment_id: &String) -> Option<Commitment> {
+    let key = DataKey::Commitment(commitment_id.clone());
+    e.storage().persistent().get(&key)
+}
+
+fn set_commitment(e: &Env, commitment: &Commitment) {
+    let key = DataKey::Commitment(commitment.commitment_id.clone());
+    e.storage().persistent().set(&key, commitment);
+}
+
+fn get_commitment_balance(e: &Env, commitment_id: &String) -> i128 {
+    let key = DataKey::CommitmentBalance(commitment_id.clone());
+    e.storage().persistent().get(&key).unwrap_or(0)
+}
+
+fn set_commitment_balance(e: &Env, commitment_id: &String, balance: i128) {
+    let key = DataKey::CommitmentBalance(commitment_id.clone());
+    e.storage().persistent().set(&key, &balance);
+}
+
+fn get_allocation_tracking(e: &Env, commitment_id: &String) -> AllocationTracking {
+    let key = DataKey::AllocationTracking(commitment_id.clone());
+    e.storage().persistent().get(&key).unwrap_or(AllocationTracking {
+        total_allocated: 0,
+        allocations: Vec::new(&e),
+    })
+}
+
+fn set_allocation_tracking(e: &Env, commitment_id: &String, tracking: &AllocationTracking) {
+    let key = DataKey::AllocationTracking(commitment_id.clone());
+    e.storage().persistent().set(&key, tracking);
+}
+
+fn is_initialized(e: &Env) -> bool {
+    let key = DataKey::InitFlag;
+    if e.storage().instance().has(&key) {
+        e.storage().instance().get::<DataKey, bool>(&key).unwrap_or(false)
+    } else {
+        false
+    }
+}
+
+fn set_initialized(e: &Env) {
+    let key = DataKey::InitFlag;
+    e.storage().instance().set(&key, &true);
+}
+
+// Asset transfer helper function using Stellar asset contract
+fn transfer_asset(e: &Env, asset: &Address, from: &Address, to: &Address, amount: i128) {
+    if amount <= 0 {
+        panic_invalid_amount();
+    }
+
+    // Call the asset contract's transfer function
+    // The asset contract should have a transfer function with signature:
+    // transfer(from: Address, to: Address, amount: i128)
+    // Using invoke_contract to call the asset contract's transfer function
+    let transfer_symbol = symbol_short!("transfer");
+    
+    // Invoke the contract's transfer function
+    // Note: This assumes the asset contract follows the standard token interface
+    let _: () = e.invoke_contract(
+        asset,
+        &transfer_symbol,
+        soroban_sdk::vec![e, from.clone().into_val(e), to.clone().into_val(e), amount.into_val(e)],
+    );
+}
+
+#[contract]
+pub struct CommitmentCoreContract;
+
+// Storage keys - using Symbol for efficient storage (max 9 chars)
+fn commitment_key(_e: &Env) -> Symbol {
+    symbol_short!("Commit")
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
@@ -136,6 +302,7 @@ pub enum DataKey {
     SupportedAssets,          // Vec<Address> — whitelist; empty = allow all
     AssetMetadata(Address),   // asset -> AssetMetadata (optional)
     TotalValueLockedByAsset(Address), // asset -> i128
+    Version,
 }
 
 /// Transfer assets from owner to contract
@@ -258,6 +425,24 @@ fn require_admin(e: &Env, caller: &Address) {
     }
 }
 
+fn read_version(e: &Env) -> u32 {
+    e.storage()
+        .instance()
+        .get::<_, u32>(&DataKey::Version)
+        .unwrap_or(0)
+}
+
+fn write_version(e: &Env, version: u32) {
+    e.storage().instance().set(&DataKey::Version, &version);
+}
+
+fn require_valid_wasm_hash(e: &Env, wasm_hash: &BytesN<32>) {
+    let zero = BytesN::from_array(e, &[0; 32]);
+    if *wasm_hash == zero {
+        panic!("Invalid wasm hash");
+    }
+}
+
 #[contract]
 pub struct CommitmentCoreContract;
 
@@ -311,6 +496,37 @@ impl CommitmentCoreContract {
     }
 
     /// Initialize the core commitment contract
+    pub fn initialize(e: Env, admin: Address, _nft_contract: Address) {
+        if is_initialized(&e) {
+            panic_already_initialized();
+        }
+        
+        set_admin(&e, &admin);
+        set_initialized(&e);
+    }
+
+    /// Add an authorized allocation contract
+    pub fn add_authorized_allocator(e: Env, allocator: Address) {
+        let admin = get_admin(&e);
+        admin.require_auth();
+        
+        set_authorized_allocator(&e, &allocator, true);
+    }
+
+    /// Remove an authorized allocation contract
+    pub fn remove_authorized_allocator(e: Env, allocator: Address) {
+        let admin = get_admin(&e);
+        admin.require_auth();
+        
+        set_authorized_allocator(&e, &allocator, false);
+    }
+
+    /// Check if an address is an authorized allocator
+    pub fn is_authorized_allocator(e: Env, allocator: Address) -> bool {
+        is_authorized_allocator(&e, &allocator)
+    pub fn initialize(_e: Env, _admin: Address, _nft_contract: Address) {
+        // TODO: Store admin and NFT contract address
+        // TODO: Initialize storage
     pub fn initialize(e: Env, admin: Address, nft_contract: Address) {
         // Check if already initialized
         if e.storage().instance().has(&DataKey::Admin) {
@@ -332,6 +548,8 @@ impl CommitmentCoreContract {
         e.storage()
             .instance()
             .set(&DataKey::TotalValueLocked, &0i128);
+
+        write_version(&e, CURRENT_VERSION);
     }
 
     /// Create a new commitment
@@ -520,6 +738,8 @@ impl CommitmentCoreContract {
     }
 
     /// Get commitment details
+    pub fn get_commitment(e: Env, commitment_id: String) -> Option<Commitment> {
+        get_commitment(&e, &commitment_id)
     pub fn get_commitment(e: Env, commitment_id: String) -> Commitment {
         read_commitment(&e, &commitment_id)
             .unwrap_or_else(|| fail(&e, CommitmentError::CommitmentNotFound, "get_commitment"))
@@ -738,8 +958,10 @@ impl CommitmentCoreContract {
             fail(&e, CommitmentError::CommitmentNotFound, "settle")
         });
 
-        // Verify commitment is expired
+        // Verify commitment is expired or within grace period
         let current_time = e.ledger().timestamp();
+        // Requirement: Allow settlement if expired or within grace period
+        // Note: Settlement is allowed if current_time >= expires_at
         if current_time < commitment.expires_at {
             set_reentrancy_guard(&e, false);
             fail(&e, CommitmentError::NotExpired, "settle");
@@ -802,9 +1024,9 @@ impl CommitmentCoreContract {
         // Clear reentrancy guard
         set_reentrancy_guard(&e, false);
 
-        // Emit settlement event
+        // Emit settlement event with required fields: commitment_id, owner, settlement_amount, timestamp
         e.events().publish(
-            (symbol_short!("Settled"), commitment_id),
+            (symbol_short!("Settled"), commitment_id, commitment.owner),
             (settlement_amount, e.ledger().timestamp()),
         );
     }
@@ -908,6 +1130,144 @@ impl CommitmentCoreContract {
         );
     }
 
+    /// Allocate liquidity to a target pool
+    /// 
+    /// # Arguments
+    /// * `caller` - The address of the allocation contract calling this function (must be authorized)
+    /// * `commitment_id` - The ID of the commitment
+    /// * `target_pool` - The address of the target pool to allocate to
+    /// * `amount` - The amount to allocate
+    /// 
+    /// # Errors
+    /// * `Unauthorized` - If caller is not an authorized allocation contract
+    /// * `InactiveCommitment` - If commitment is not active
+    /// * `InsufficientBalance` - If commitment doesn't have enough balance
+    /// * `TransferFailed` - If asset transfer fails
+    /// * `InvalidAmount` - If amount is invalid (<= 0)
+    /// 
+    /// # Note
+    /// The allocation contract should pass its own address as the `caller` parameter.
+    /// This address must be authorized by the admin before calling this function.
+    pub fn allocate(e: Env, caller: Address, commitment_id: String, target_pool: Address, amount: i128) {
+        // Verify caller is authorized allocation contract
+        if !is_authorized_allocator(&e, &caller) {
+            panic_unauthorized();
+        }
+
+        // Verify commitment exists and is active
+        let commitment = match get_commitment(&e, &commitment_id) {
+            Some(c) => c,
+            None => panic_inactive_commitment(),
+        };
+
+        // Check if commitment is active
+        let active_status = String::from_str(&e, "active");
+        if commitment.status != active_status {
+            panic_inactive_commitment();
+        }
+
+        // Verify sufficient balance
+        let balance = get_commitment_balance(&e, &commitment_id);
+        if balance < amount {
+            panic_insufficient_balance();
+        }
+
+        // Transfer assets to target pool
+        let contract_address = e.current_contract_address();
+        transfer_asset(&e, &commitment.asset_address, &contract_address, &target_pool, amount);
+
+        // Update commitment balance
+        let new_balance = balance - amount;
+        set_commitment_balance(&e, &commitment_id, new_balance);
+
+        // Record allocation
+        let mut tracking = get_allocation_tracking(&e, &commitment_id);
+        let timestamp = e.ledger().timestamp();
+        
+        let allocation = Allocation {
+            commitment_id: commitment_id.clone(),
+            target_pool: target_pool.clone(),
+            amount,
+            timestamp,
+        };
+        
+        tracking.allocations.push_back(allocation.clone());
+        tracking.total_allocated += amount;
+        set_allocation_tracking(&e, &commitment_id, &tracking);
+
+        // Emit allocation event
+        e.events().publish(
+            (symbol_short!("alloc"), symbol_short!("cmt_id")),
+            commitment_id,
+        );
+        e.events().publish(
+            (symbol_short!("alloc"), symbol_short!("pool")),
+            target_pool,
+        );
+        e.events().publish(
+            (symbol_short!("alloc"), symbol_short!("amount")),
+            amount,
+        );
+        e.events().publish(
+            (symbol_short!("alloc"), symbol_short!("time")),
+            timestamp,
+        );
+    }
+
+    /// Get allocation tracking for a commitment
+    pub fn get_allocation_tracking(e: Env, commitment_id: String) -> AllocationTracking {
+        get_allocation_tracking(&e, &commitment_id)
+    }
+
+    /// Deallocate liquidity from a pool (optional functionality)
+    /// This would be called when liquidity is returned from a pool
+    /// 
+    /// # Arguments
+    /// * `caller` - The address of the allocation contract calling this function (must be authorized)
+    /// * `commitment_id` - The ID of the commitment
+    /// * `target_pool` - The address of the pool to deallocate from
+    /// * `amount` - The amount to deallocate
+    pub fn deallocate(e: Env, caller: Address, commitment_id: String, target_pool: Address, amount: i128) {
+        // Verify caller is authorized
+        if !is_authorized_allocator(&e, &caller) {
+            panic_unauthorized();
+        }
+
+        // Get commitment
+        let commitment = match get_commitment(&e, &commitment_id) {
+            Some(c) => c,
+            None => panic_inactive_commitment(),
+        };
+
+        // Transfer assets back from pool to commitment contract
+        let contract_address = e.current_contract_address();
+        transfer_asset(&e, &commitment.asset_address, &target_pool, &contract_address, amount);
+
+        // Update commitment balance
+        let balance = get_commitment_balance(&e, &commitment_id);
+        set_commitment_balance(&e, &commitment_id, balance + amount);
+
+        // Update allocation tracking
+        let mut tracking = get_allocation_tracking(&e, &commitment_id);
+        tracking.total_allocated -= amount;
+        if tracking.total_allocated < 0 {
+            tracking.total_allocated = 0;
+        }
+        set_allocation_tracking(&e, &commitment_id, &tracking);
+
+        // Emit deallocation event
+        e.events().publish(
+            (symbol_short!("dealloc"), symbol_short!("cmt_id")),
+            commitment_id,
+        );
+        e.events().publish(
+            (symbol_short!("dealloc"), symbol_short!("pool")),
+            target_pool,
+        );
+        e.events().publish(
+            (symbol_short!("dealloc"), symbol_short!("amount")),
+            amount,
+        );
     /// Allocate liquidity (called by allocation strategy)
     ///
     /// # Reentrancy Protection

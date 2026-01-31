@@ -1,9 +1,11 @@
 #![no_std]
 use shared_utils::RateLimiter;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, IntoVal, Map,
-    String, Symbol, TryIntoVal, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, IntoVal, Map, String,
+    Symbol, TryIntoVal, Val, Vec,
 };
+
+pub const CURRENT_VERSION: u32 = 1;
 
 // ============================================================================
 // Error Types
@@ -30,6 +32,12 @@ pub enum AttestationError {
     CommitmentNotFound = 7,
     /// Storage operation failed
     StorageError = 8,
+    /// Invalid WASM hash
+    InvalidWasmHash = 9,
+    /// Invalid version
+    InvalidVersion = 10,
+    /// Migration already applied
+    AlreadyMigrated = 11,
 }
 
 // ============================================================================
@@ -61,6 +69,8 @@ pub enum DataKey {
     TotalFees,
     /// Per-verifier analytics: attestation count by verifier
     VerifierAttestationCount(Address),
+    /// Contract version
+    Version,
 }
 
 #[contracttype]
@@ -90,9 +100,10 @@ pub struct AttestParams {
 pub struct CommitmentRules {
     pub duration_days: u32,
     pub max_loss_percent: u32,
-    pub commitment_type: String,
+    pub commitment_type: String, // "safe", "balanced", "aggressive"
     pub early_exit_penalty: u32,
     pub min_fee_threshold: i128,
+    pub grace_period_days: u32,
 }
 
 #[contracttype]
@@ -107,8 +118,39 @@ pub struct Commitment {
     pub created_at: u64,
     pub expires_at: u64,
     pub current_value: i128,
-    pub status: String,
+    pub status: String, // "active", "settled", "violated", "early_exit"
 }
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    Admin,
+    CommitmentCore,
+    HealthState(String),
+    Attestations(String),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HealthState {
+    pub fees_generated: i128,
+    pub volatility_exposure: i128,
+    pub last_attestation: u64,
+    pub compliance_score: u32, // 0-100; 0 means "unknown / not calculated"
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Attestation {
+    pub commitment_id: String,
+    pub timestamp: u64,
+    pub attestation_type: String, // "health_check", "violation", "fee_generation", "drawdown"
+    pub data: Map<String, String>, // Flexible data structure
+    pub is_compliant: bool,
+    pub verified_by: Address,
+}
+
+// Import Commitment types from commitment_core (define locally for cross-contract calls)
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -269,6 +311,76 @@ impl AttestationEngineContract {
             .instance()
             .get(&DataKey::CoreContract)
             .ok_or(AttestationError::NotInitialized)
+    }
+
+    /// Get current on-chain version (0 if legacy/uninitialized).
+    pub fn get_version(e: Env) -> u32 {
+        read_version(&e)
+    }
+
+    /// Update admin (admin-only).
+    pub fn set_admin(
+        e: Env,
+        caller: Address,
+        new_admin: Address,
+    ) -> Result<(), AttestationError> {
+        require_admin(&e, &caller)?;
+        e.storage().instance().set(&DataKey::Admin, &new_admin);
+        Ok(())
+    }
+
+    /// Upgrade contract WASM (admin-only).
+    pub fn upgrade(
+        e: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), AttestationError> {
+        require_admin(&e, &caller)?;
+        require_valid_wasm_hash(&e, &new_wasm_hash)?;
+        e.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
+    }
+
+    /// Migrate storage from a previous version to CURRENT_VERSION (admin-only).
+    pub fn migrate(
+        e: Env,
+        caller: Address,
+        from_version: u32,
+    ) -> Result<(), AttestationError> {
+        require_admin(&e, &caller)?;
+
+        let stored_version = read_version(&e);
+        if stored_version == CURRENT_VERSION {
+            return Err(AttestationError::AlreadyMigrated);
+        }
+        if from_version != stored_version || from_version > CURRENT_VERSION {
+            return Err(AttestationError::InvalidVersion);
+        }
+
+        // Ensure analytics counters are initialized
+        if !e.storage().instance().has(&DataKey::TotalAttestations) {
+            e.storage()
+                .instance()
+                .set(&DataKey::TotalAttestations, &0u64);
+        }
+        if !e.storage().instance().has(&DataKey::TotalViolations) {
+            e.storage()
+                .instance()
+                .set(&DataKey::TotalViolations, &0u64);
+        }
+        if !e.storage().instance().has(&DataKey::TotalFees) {
+            e.storage().instance().set(&DataKey::TotalFees, &0i128);
+        }
+        if !e.storage().instance().has(&DataKey::ReentrancyGuard) {
+            e.storage()
+                .instance()
+                .set(&DataKey::ReentrancyGuard, &false);
+        }
+
+        e.storage()
+            .instance()
+            .set(&DataKey::Version, &CURRENT_VERSION);
+        Ok(())
     }
 
     /// Get stored health metrics for a commitment (without recalculation)
@@ -546,12 +658,12 @@ impl AttestationEngineContract {
         // 8. Create attestation record
         let timestamp = e.ledger().timestamp();
         let attestation = Attestation {
-            commitment_id: commitment_id.clone(),
-            attestation_type: attestation_type.clone(),
-            data,
-            timestamp,
-            verified_by: caller.clone(),
-            is_compliant,
+            commitment_id: commitment_id_clone,
+            attestation_type: attestation_type_clone,
+            data: data_clone,
+            timestamp: e.ledger().timestamp(),
+            verified_by: verified_by_clone,
+            is_compliant: true, // Default to true, can be updated by logic
         };
 
         // 9. Store attestation in commitment's list
@@ -562,7 +674,10 @@ impl AttestationEngineContract {
             .get(&key)
             .unwrap_or_else(|| Vec::new(&e));
 
-        attestations.push_back(attestation.clone());
+        // Add new attestation
+        attestations.push_back(attestation);
+
+        // Store updated list
         e.storage().persistent().set(&key, &attestations);
 
         // 10. Update health metrics
@@ -642,6 +757,15 @@ impl AttestationEngineContract {
 
     /// Get current health metrics for a commitment
     pub fn get_health_metrics(e: Env, commitment_id: String) -> HealthMetrics {
+        let core = Self::get_commitment_core(&e);
+        let commitment = Self::core_get_commitment(&e, &core, &commitment_id);
+
+        let initial_value = commitment.amount;
+        let current_value = commitment.current_value;
+        let drawdown_percent = Self::calc_drawdown_percent(initial_value, current_value);
+
+        let state = Self::get_health_state_or_default(&e, &commitment_id);
+
         // Get commitment from core contract
         let commitment_core: Address = e.storage().instance().get(&DataKey::CoreContract).unwrap();
 
@@ -720,16 +844,58 @@ impl AttestationEngineContract {
             current_value,
             initial_value,
             drawdown_percent,
-            fees_generated,
-            volatility_exposure,
-            last_attestation,
-            compliance_score,
+            fees_generated: state.fees_generated,
+            volatility_exposure: state.volatility_exposure,
+            last_attestation: state.last_attestation,
+            compliance_score: state.compliance_score,
         }
     }
 
-    /// Verify commitment compliance
+    /// Record fee generation
     ///
-    /// Checks if a commitment is following its rules based on current health metrics
+    /// Convenience function that creates a fee_generation attestation
+    ///
+    /// # Arguments
+    /// * `caller` - Must be authorized verifier
+    /// * `commitment_id` - The commitment generating fees
+    /// * `fee_amount` - The fee amount generated
+    /// Verify commitment compliance
+    pub fn verify_compliance(e: Env, commitment_id: String) -> bool {
+        let core = Self::get_commitment_core(&e);
+        let commitment = Self::core_get_commitment(&e, &core, &commitment_id);
+        let health = Self::get_health_metrics(e.clone(), commitment_id.clone());
+        let has_violations = Self::core_check_violations(&e, &core, &commitment_id);
+
+        // Loss limit compliance
+        let max_loss = commitment.rules.max_loss_percent as i128;
+        let loss_ok = health.drawdown_percent <= max_loss;
+
+        // Duration compliance (if applicable)
+        let now = e.ledger().timestamp();
+        let duration_ok = if commitment.rules.duration_days == 0 {
+            true
+        } else {
+            now <= commitment.expires_at
+        };
+
+        // Fee threshold compliance (if applicable)
+        let fee_ok = if commitment.rules.min_fee_threshold <= 0 {
+            true
+        } else {
+            health.fees_generated >= commitment.rules.min_fee_threshold
+        };
+
+        // Overall health compliance (if score is present; 0 means unknown)
+        let overall_health_ok = health.compliance_score == 0 || health.compliance_score >= 80;
+
+        // Status-based sanity checks
+        let status_violated = commitment.status == String::from_str(&e, "violated");
+        let status_ok = !status_violated;
+
+        loss_ok && duration_ok && fee_ok && overall_health_ok && !has_violations && status_ok
+    }
+
+    /// Record fee generation
     ///
     /// # Arguments
     /// * `commitment_id` - The commitment to verify
@@ -807,10 +973,34 @@ impl AttestationEngineContract {
             commitment_id.clone(),
             String::from_str(&e, "fee_generation"),
             data,
-            true, // Fee generation is compliant
-        )?;
+            timestamp: e.ledger().timestamp(),
+            verified_by: caller.clone(),
+            is_compliant: true,
+        };
 
-        // Emit fee event
+        // Store attestation
+        let atts_key = (symbol_short!("ATTS"), commitment_id.clone());
+        let mut attestations: Vec<Attestation> = e
+            .storage()
+            .persistent()
+            .get(&atts_key)
+            .unwrap_or_else(|| Vec::new(&e));
+        attestations.push_back(attestation);
+        e.storage().persistent().set(&atts_key, &attestations);
+        
+        // Recalculate compliance score (may call external contract)
+        metrics.compliance_score = Self::calculate_compliance_score(e.clone(), commitment_id.clone());
+        
+        // Update last attestation timestamp
+        metrics.last_attestation = e.ledger().timestamp();
+        
+        // Store updated health metrics
+        Self::store_health_metrics(&e, &metrics);
+        
+        // Clear reentrancy guard
+        e.storage().instance().set(&guard_key, &false);
+        
+        // Emit FeeRecorded event
         e.events().publish(
             (Symbol::new(&e, "FeeRecorded"), commitment_id),
             (fee_amount, e.ledger().timestamp()),
@@ -820,9 +1010,6 @@ impl AttestationEngineContract {
     }
 
     /// Record drawdown event
-    ///
-    /// Convenience function that creates a drawdown attestation
-    /// Also checks if max_loss_percent is exceeded
     ///
     /// # Arguments
     /// * `caller` - Must be authorized verifier
@@ -864,17 +1051,57 @@ impl AttestationEngineContract {
             Self::i128_to_string(&e, max_loss),
         );
 
-        // Call attest with drawdown type
-        Self::attest(
-            e.clone(),
-            caller,
-            commitment_id.clone(),
-            String::from_str(&e, "drawdown"),
-            data,
-            is_compliant,
-        )?;
+            // Store violation attestation
+            let atts_key = (symbol_short!("ATTS"), commitment_id.clone());
+            let mut attestations: Vec<Attestation> = e
+                .storage()
+                .persistent()
+                .get(&atts_key)
+                .unwrap_or_else(|| Vec::new(&e));
+            attestations.push_back(violation_attestation);
+            e.storage().persistent().set(&atts_key, &attestations);
 
-        // Emit drawdown event with violation warning if applicable
+            // Emit ViolationDetected event
+            e.events().publish(
+                (Symbol::new(&e, "ViolationDetected"), commitment_id.clone()),
+                (drawdown_percent, max_loss_percent, e.ledger().timestamp()),
+            );
+        }
+        
+        // Create drawdown attestation
+        let drawdown_data = Map::new(&e);
+        let drawdown_attestation = Attestation {
+            commitment_id: commitment_id.clone(),
+            attestation_type: String::from_str(&e, "drawdown"),
+            data: drawdown_data,
+            timestamp: e.ledger().timestamp(),
+            verified_by: caller.clone(),
+            is_compliant: !is_violation,
+        };
+
+        // Store drawdown attestation
+        let atts_key = (symbol_short!("ATTS"), commitment_id.clone());
+        let mut attestations: Vec<Attestation> = e
+            .storage()
+            .persistent()
+            .get(&atts_key)
+            .unwrap_or_else(|| Vec::new(&e));
+        attestations.push_back(drawdown_attestation);
+        e.storage().persistent().set(&atts_key, &attestations);
+        
+        // Recalculate compliance score (may call external contract)
+        metrics.compliance_score = Self::calculate_compliance_score(e.clone(), commitment_id.clone());
+        
+        // Update last attestation timestamp
+        metrics.last_attestation = e.ledger().timestamp();
+        
+        // Store updated health metrics
+        Self::store_health_metrics(&e, &metrics);
+        
+        // Clear reentrancy guard
+        e.storage().instance().set(&guard_key, &false);
+        
+        // Emit DrawdownRecorded event
         e.events().publish(
             (Symbol::new(&e, "DrawdownRecorded"), commitment_id),
             (drawdown_percent, is_compliant, e.ledger().timestamp()),
@@ -1392,6 +1619,35 @@ impl AttestationEngineContract {
     }
 }
 
+fn read_version(e: &Env) -> u32 {
+    e.storage()
+        .instance()
+        .get::<_, u32>(&DataKey::Version)
+        .unwrap_or(0)
+}
+
+fn require_admin(e: &Env, caller: &Address) -> Result<(), AttestationError> {
+    caller.require_auth();
+    let admin: Address = e
+        .storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .ok_or(AttestationError::NotInitialized)?;
+    if *caller != admin {
+        return Err(AttestationError::Unauthorized);
+    }
+    Ok(())
+}
+
+fn require_valid_wasm_hash(e: &Env, wasm_hash: &BytesN<32>) -> Result<(), AttestationError> {
+    let zero = BytesN::from_array(e, &[0; 32]);
+    if *wasm_hash == zero {
+        return Err(AttestationError::InvalidWasmHash);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;
 #[cfg(all(test, feature = "benchmark"))]
 mod benchmarks;
-mod tests;

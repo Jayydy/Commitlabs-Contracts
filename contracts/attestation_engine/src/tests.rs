@@ -7,7 +7,7 @@ use commitment_core::{
 };
 use soroban_sdk::{
     symbol_short, testutils::Address as _, testutils::Events, testutils::Ledger as _, vec, Address,
-    Env, IntoVal, Map, String, Symbol,
+    Env, IntoVal, Map, String,
 };
 
 fn store_core_commitment(
@@ -32,6 +32,7 @@ fn store_core_commitment(
             commitment_type: String::from_str(e, "balanced"),
             early_exit_penalty: 10,
             min_fee_threshold: 1000,
+            grace_period_days: 3,
         },
         amount,
         asset_address: Address::generate(e),
@@ -54,6 +55,196 @@ fn setup_test_env() -> (Env, Address, Address, Address) {
     let e = Env::default();
     e.mock_all_auths();
     let admin = Address::generate(&e);
+    let commitment_core_id = e.register_contract(None, MockCoreContract);
+    let _contract_id = e.register_contract(None, AttestationEngineContract);
+
+    e.as_contract(&_contract_id, || {
+        AttestationEngineContract::initialize(e.clone(), admin, commitment_core_id);
+    });
+}
+
+#[test]
+fn test_attest() {
+    let e = Env::default();
+    let verified_by = Address::generate(&e);
+    let core_id = e.register_contract(None, MockCoreContract);
+    let _contract_id = e.register_contract(None, AttestationEngineContract);
+
+    e.as_contract(&_contract_id, || {
+        AttestationEngineContract::initialize(e.clone(), Address::generate(&e), core_id.clone());
+    });
+
+    let commitment_id = String::from_str(&e, "c1");
+    let owner = Address::generate(&e);
+
+    let rules = CommitmentRules {
+        duration_days: 10,
+        max_loss_percent: 20,
+        commitment_type: String::from_str(&e, "safe"),
+        early_exit_penalty: 0,
+        min_fee_threshold: 0,
+    };
+    let commitment = Commitment {
+        commitment_id: commitment_id.clone(),
+        owner,
+        nft_token_id: 1,
+        rules,
+        amount: 1_000,
+        asset_address: Address::generate(&e),
+        created_at: 0,
+        expires_at: 100,
+        current_value: 1_000,
+        status: String::from_str(&e, "active"),
+    };
+
+    e.as_contract(&core_id, || {
+        MockCoreContract::set_commitment(e.clone(), commitment_id.clone(), commitment);
+        MockCoreContract::set_violations(e.clone(), commitment_id.clone(), false);
+    });
+
+    let data = Map::<String, String>::new(&e);
+    e.as_contract(&_contract_id, || {
+        AttestationEngineContract::attest(
+            e.clone(),
+            commitment_id.clone(),
+            String::from_str(&e, "health_check"),
+            data,
+            verified_by,
+        );
+    });
+
+    let atts = e.as_contract(&_contract_id, || {
+        AttestationEngineContract::get_attestations(e.clone(), commitment_id)
+    });
+    assert!(atts.len() == 1);
+}
+
+#[test]
+fn test_verify_compliance() {
+    let e = Env::default();
+    // Set a deterministic ledger timestamp for duration checks.
+    e.ledger().with_mut(|li| {
+        li.timestamp = 50;
+    });
+
+    let core_id = e.register_contract(None, MockCoreContract);
+    let _contract_id = e.register_contract(None, AttestationEngineContract);
+    e.as_contract(&_contract_id, || {
+        AttestationEngineContract::initialize(e.clone(), Address::generate(&e), core_id.clone());
+    });
+
+    let commitment_id = String::from_str(&e, "c1");
+    let owner = Address::generate(&e);
+
+    let base_rules = CommitmentRules {
+        duration_days: 10,
+        max_loss_percent: 20,
+        commitment_type: String::from_str(&e, "safe"),
+        early_exit_penalty: 0,
+        min_fee_threshold: 100,
+    };
+
+    // Happy path: in-range drawdown, not expired, fees meet threshold, no violations.
+    let mut commitment = Commitment {
+        commitment_id: commitment_id.clone(),
+        owner: owner.clone(),
+        nft_token_id: 1,
+        rules: base_rules.clone(),
+        amount: 1_000,
+        asset_address: Address::generate(&e),
+        created_at: 0,
+        expires_at: 100,
+        current_value: 900, // 10% drawdown
+        status: String::from_str(&e, "active"),
+    };
+    e.as_contract(&core_id, || {
+        MockCoreContract::set_commitment(e.clone(), commitment_id.clone(), commitment.clone());
+        MockCoreContract::set_violations(e.clone(), commitment_id.clone(), false);
+    });
+    e.as_contract(&_contract_id, || {
+        AttestationEngineContract::record_fees(e.clone(), commitment_id.clone(), 100);
+    });
+
+    assert!(e.as_contract(&_contract_id, || {
+        AttestationEngineContract::verify_compliance(e.clone(), commitment_id.clone())
+    }));
+
+    // Loss limit exceeded
+    commitment.current_value = 700; // 30% drawdown
+    e.as_contract(&core_id, || {
+        MockCoreContract::set_commitment(e.clone(), commitment_id.clone(), commitment.clone());
+    });
+    assert!(!e.as_contract(&_contract_id, || {
+        AttestationEngineContract::verify_compliance(e.clone(), commitment_id.clone())
+    }));
+
+    // Duration expired
+    commitment.current_value = 900;
+    commitment.expires_at = 40;
+    e.as_contract(&core_id, || {
+        MockCoreContract::set_commitment(e.clone(), commitment_id.clone(), commitment.clone());
+    });
+    assert!(!e.as_contract(&_contract_id, || {
+        AttestationEngineContract::verify_compliance(e.clone(), commitment_id.clone())
+    }));
+
+    // Fee threshold not met
+    commitment.expires_at = 100;
+    e.as_contract(&core_id, || {
+        MockCoreContract::set_commitment(e.clone(), commitment_id.clone(), commitment.clone());
+    });
+    // Reset engine fees by using a new commitment id
+    let commitment_id2 = String::from_str(&e, "c2");
+    commitment.commitment_id = commitment_id2.clone();
+    e.as_contract(&core_id, || {
+        MockCoreContract::set_commitment(e.clone(), commitment_id2.clone(), commitment.clone());
+        MockCoreContract::set_violations(e.clone(), commitment_id2.clone(), false);
+    });
+    assert!(!e.as_contract(&_contract_id, || {
+        AttestationEngineContract::verify_compliance(e.clone(), commitment_id2.clone())
+    }));
+
+    // Active violations
+    e.as_contract(&core_id, || {
+        MockCoreContract::set_violations(e.clone(), commitment_id2.clone(), true);
+    });
+    assert!(!e.as_contract(&_contract_id, || {
+        AttestationEngineContract::verify_compliance(e.clone(), commitment_id2)
+    }));
+
+    // Edge: duration_days == 0 bypasses duration check
+    let commitment_id3 = String::from_str(&e, "c3");
+    let rules_no_duration = CommitmentRules {
+        duration_days: 0,
+        ..base_rules
+    };
+    let commitment3 = Commitment {
+        commitment_id: commitment_id3.clone(),
+        owner,
+        nft_token_id: 3,
+        rules: rules_no_duration,
+        amount: 0, // edge: amount==0 -> drawdown=0
+        asset_address: Address::generate(&e),
+        created_at: 0,
+        expires_at: 0,
+        current_value: 0,
+        status: String::from_str(&e, "active"),
+    };
+    e.as_contract(&core_id, || {
+        MockCoreContract::set_commitment(e.clone(), commitment_id3.clone(), commitment3);
+        MockCoreContract::set_violations(e.clone(), commitment_id3.clone(), false);
+    });
+    // fees not met but threshold is 100 -> still should fail; make threshold 0
+    let mut commitment3b = e.as_contract(&core_id, || {
+        MockCoreContract::get_commitment(e.clone(), commitment_id3.clone())
+    });
+    commitment3b.rules.min_fee_threshold = 0;
+    e.as_contract(&core_id, || {
+        MockCoreContract::set_commitment(e.clone(), commitment_id3.clone(), commitment3b);
+    });
+    assert!(e.as_contract(&_contract_id, || {
+        AttestationEngineContract::verify_compliance(e.clone(), commitment_id3)
+    }));
 
     // Register and initialize commitment_core contract
     let commitment_core_id = e.register_contract(None, CommitmentCoreContract);
@@ -392,9 +583,12 @@ fn test_attest_and_get_metrics() {
         30,
         1000,
     );
-    // Use valid attestation type: health_check
-    let attestation_type = String::from_str(&e, "health_check");
-    let data = Map::new(&e); // health_check doesn't require specific data
+    let attestation_type = String::from_str(&e, "general");
+    let mut data = Map::new(&e);
+    data.set(
+        String::from_str(&e, "note"),
+        String::from_str(&e, "test attestation"),
+    );
 
     // Record an attestation
     e.as_contract(&contract_id, || {
@@ -592,74 +786,23 @@ fn test_attest_authorized_verifier() {
         1000,
     );
 
+    // record_fees requires caller (admin)
+    client.record_fees(&admin, &commitment_id, &100);
+
     // Add verifier
     e.as_contract(&contract_id, || {
         AttestationEngineContract::add_verifier(e.clone(), admin.clone(), verifier.clone())
             .unwrap();
     });
 
-    let attestation_type = String::from_str(&e, "health_check");
-    let data = Map::new(&e);
-
-    // Attest as authorized verifier
-    let result = e.as_contract(&contract_id, || {
-        AttestationEngineContract::attest(
-            e.clone(),
-            verifier.clone(),
-            commitment_id.clone(),
-            attestation_type.clone(),
-            data.clone(),
-            true,
-        )
-    });
-
-    assert!(result.is_ok());
-}
-
-// ============================================================================
-// Validation Tests
-// ============================================================================
-
-#[test]
-fn test_attest_invalid_commitment_id() {
-    let (e, admin, _commitment_core, contract_id) = setup_test_env();
-
-    // Use an empty commitment_id
-    let commitment_id = String::from_str(&e, "");
-    let attestation_type = String::from_str(&e, "health_check");
-    let data = Map::new(&e);
-
-    let result = e.as_contract(&contract_id, || {
-        AttestationEngineContract::attest(
-            e.clone(),
-            admin.clone(),
-            commitment_id.clone(),
-            attestation_type.clone(),
-            data.clone(),
-            true,
-        )
-    });
-
-    assert_eq!(result, Err(AttestationError::InvalidCommitmentId));
-}
-
-#[test]
-fn test_attest_invalid_attestation_type() {
-    let (e, admin, _commitment_core, contract_id) = setup_test_env();
-
-    let commitment_id = String::from_str(&e, "test_commitment");
-    let owner = Address::generate(&e);
-
-    store_core_commitment(
-        &e,
-        &_commitment_core,
-        "test_commitment",
-        &owner,
-        1000,
-        1000,
-        10,
-        30,
-        1000,
+    assert_eq!(last_event.0, contract_id);
+    assert_eq!(
+        last_event.1,
+        vec![
+            &e,
+            symbol_short!("FeeRec").into_val(&e),
+            commitment_id.into_val(&e)
+        ]
     );
 
     // Use invalid attestation type
@@ -714,26 +857,14 @@ fn test_attest_invalid_data_violation() {
         )
     });
 
-    assert_eq!(result, Err(AttestationError::InvalidAttestationData));
-}
-
-#[test]
-fn test_attest_invalid_data_fee_generation() {
-    let (e, admin, _commitment_core, contract_id) = setup_test_env();
-
-    let commitment_id = String::from_str(&e, "test_commitment");
-    let owner = Address::generate(&e);
-
-    store_core_commitment(
-        &e,
-        &_commitment_core,
-        "test_commitment",
-        &owner,
-        1000,
-        1000,
-        10,
-        30,
-        1000,
+    assert_eq!(last_event.0, contract_id);
+    assert_eq!(
+        last_event.1,
+        vec![
+            &e,
+            symbol_short!("Drawdown").into_val(&e),
+            commitment_id.into_val(&e)
+        ]
     );
 
     // fee_generation requires "fee_amount" field

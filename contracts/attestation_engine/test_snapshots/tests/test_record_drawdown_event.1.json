@@ -106,6 +106,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "ActiveCommitments"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "vec": []
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "Admin"
                             }
                           ]
@@ -229,6 +241,14 @@
                                   },
                                   {
                                     "key": {
+                                      "symbol": "grace_period_days"
+                                    },
+                                    "val": {
+                                      "u32": 3
+                                    }
+                                  },
+                                  {
+                                    "key": {
                                       "symbol": "max_loss_percent"
                                     },
                                     "val": {
@@ -258,6 +278,18 @@
                               }
                             }
                           ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "CreationFeeBps"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 0
                         }
                       },
                       {
@@ -886,6 +918,14 @@
                       },
                       {
                         "key": {
+                          "symbol": "grace_period_days"
+                        },
+                        "val": {
+                          "u32": 3
+                        }
+                      },
+                      {
+                        "key": {
                           "symbol": "max_loss_percent"
                         },
                         "val": {
@@ -1062,6 +1102,14 @@
                         },
                         "val": {
                           "u32": 10
+                        }
+                      },
+                      {
+                        "key": {
+                          "symbol": "grace_period_days"
+                        },
+                        "val": {
+                          "u32": 3
                         }
                       },
                       {

@@ -39,6 +39,16 @@ pub enum ContractError {
     InvalidAmount = 13,
     /// Reentrancy detected
     ReentrancyDetected = 14,
+    /// Invalid WASM hash
+    InvalidWasmHash = 15,
+    /// Invalid version
+    InvalidVersion = 16,
+    /// Migration already applied
+    AlreadyMigrated = 17,
+    /// Transfer to zero address is not allowed
+    TransferToZeroAddress = 18,
+    /// NFT is locked (active commitment) and cannot be transferred
+    NFTLocked = 19,
 }
 
 // ============================================================================
@@ -70,6 +80,15 @@ pub struct CommitmentNFT {
     pub early_exit_penalty: u32,
 }
 
+/// Parameters for batch NFT transfer operations
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferParams {
+    pub from: Address,
+    pub to: Address,
+    pub token_id: u32,
+}
+
 /// Storage keys for the contract
 #[contracttype]
 pub enum DataKey {
@@ -93,10 +112,12 @@ pub enum DataKey {
     ActiveStatus(u32),
     /// Reentrancy guard flag
     ReentrancyGuard,
+    /// Contract version
+    Version,
 }
 
 // Events
-const MINT: soroban_sdk::Symbol = symbol_short!("mint");
+// const MINT: soroban_sdk::Symbol = symbol_short!("mint"); // TODO: Use this in mint function
 
 #[cfg(test)]
 mod tests;
@@ -205,6 +226,68 @@ impl CommitmentNFTContract {
             .ok_or(ContractError::NotInitialized)
     }
 
+    /// Get current on-chain version (0 if legacy/uninitialized).
+    pub fn get_version(e: Env) -> u32 {
+        read_version(&e)
+    }
+
+    /// Update admin (admin-only).
+    pub fn set_admin(
+        e: Env,
+        caller: Address,
+        new_admin: Address,
+    ) -> Result<(), ContractError> {
+        require_admin(&e, &caller)?;
+        e.storage().instance().set(&DataKey::Admin, &new_admin);
+        Ok(())
+    }
+
+    /// Upgrade contract WASM (admin-only).
+    pub fn upgrade(
+        e: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        require_admin(&e, &caller)?;
+        require_valid_wasm_hash(&e, &new_wasm_hash)?;
+        e.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
+    }
+
+    /// Migrate storage from a previous version to CURRENT_VERSION (admin-only).
+    pub fn migrate(
+        e: Env,
+        caller: Address,
+        from_version: u32,
+    ) -> Result<(), ContractError> {
+        require_admin(&e, &caller)?;
+
+        let stored_version = read_version(&e);
+        if stored_version == CURRENT_VERSION {
+            return Err(ContractError::AlreadyMigrated);
+        }
+        if from_version != stored_version || from_version > CURRENT_VERSION {
+            return Err(ContractError::InvalidVersion);
+        }
+
+        // Ensure essential counters are initialized
+        if !e.storage().instance().has(&DataKey::TokenCounter) {
+            e.storage().instance().set(&DataKey::TokenCounter, &0u32);
+        }
+        if !e.storage().instance().has(&DataKey::TokenIds) {
+            let token_ids: Vec<u32> = Vec::new(&e);
+            e.storage().instance().set(&DataKey::TokenIds, &token_ids);
+        }
+        if !e.storage().instance().has(&DataKey::ReentrancyGuard) {
+            e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+        }
+
+        e.storage()
+            .instance()
+            .set(&DataKey::Version, &CURRENT_VERSION);
+        Ok(())
+    }
+
     // ========================================================================
     // NFT Minting
     // ========================================================================
@@ -223,7 +306,7 @@ impl CommitmentNFTContract {
     ///
     /// # Returns
     /// The token_id of the newly minted NFT
-    /// 
+    ///
     /// # Reentrancy Protection
     /// Uses checks-effects-interactions pattern. This function only writes to storage
     /// and doesn't make external calls, but still protected for consistency.
@@ -239,48 +322,66 @@ impl CommitmentNFTContract {
         early_exit_penalty: u32,
     ) -> Result<u32, ContractError> {
         // Reentrancy protection
-        let guard: bool = e.storage()
+        let guard: bool = e
+            .storage()
             .instance()
             .get(&DataKey::ReentrancyGuard)
             .unwrap_or(false);
-        
+
         if guard {
             return Err(ContractError::ReentrancyDetected);
         }
         e.storage().instance().set(&DataKey::ReentrancyGuard, &true);
+        EmergencyControl::require_not_emergency(&e);
 
         // Check if contract is paused
         Pausable::require_not_paused(&e);
 
         // CHECKS: Verify contract is initialized
         if !e.storage().instance().has(&DataKey::Admin) {
-            e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+            e.storage()
+                .instance()
+                .set(&DataKey::ReentrancyGuard, &false);
             return Err(ContractError::NotInitialized);
         }
 
         // Validate inputs
         if duration_days == 0 {
-            e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+            e.storage()
+                .instance()
+                .set(&DataKey::ReentrancyGuard, &false);
             return Err(ContractError::InvalidDuration);
         }
         if max_loss_percent > 100 {
-            e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+            e.storage()
+                .instance()
+                .set(&DataKey::ReentrancyGuard, &false);
             return Err(ContractError::InvalidMaxLoss);
         }
         if !Self::is_valid_commitment_type(&e, &commitment_type) {
-            e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+            e.storage()
+                .instance()
+                .set(&DataKey::ReentrancyGuard, &false);
             return Err(ContractError::InvalidCommitmentType);
         }
         if initial_amount <= 0 {
-            e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+            e.storage()
+                .instance()
+                .set(&DataKey::ReentrancyGuard, &false);
             return Err(ContractError::InvalidAmount);
         }
 
         // EFFECTS: Update state
         // Generate unique token_id
-        let token_id: u32 = e.storage().instance().get(&DataKey::TokenCounter).unwrap_or(0);
+        let token_id: u32 = e
+            .storage()
+            .instance()
+            .get(&DataKey::TokenCounter)
+            .unwrap_or(0);
         let next_token_id = token_id + 1;
-        e.storage().instance().set(&DataKey::TokenCounter, &next_token_id);
+        e.storage()
+            .instance()
+            .set(&DataKey::TokenCounter, &next_token_id);
 
         // Calculate timestamps
         let created_at = e.ledger().timestamp();
@@ -312,21 +413,40 @@ impl CommitmentNFTContract {
         e.storage().persistent().set(&DataKey::NFT(token_id), &nft);
 
         // Update owner balance
-        let current_balance: u32 = e.storage().persistent().get(&DataKey::OwnerBalance(owner.clone())).unwrap_or(0);
-        e.storage().persistent().set(&DataKey::OwnerBalance(owner.clone()), &(current_balance + 1));
+        let current_balance: u32 = e
+            .storage()
+            .persistent()
+            .get(&DataKey::OwnerBalance(owner.clone()))
+            .unwrap_or(0);
+        e.storage().persistent().set(
+            &DataKey::OwnerBalance(owner.clone()),
+            &(current_balance + 1),
+        );
 
         // Update owner tokens list
-        let mut owner_tokens: Vec<u32> = e.storage().persistent().get(&DataKey::OwnerTokens(owner.clone())).unwrap_or(Vec::new(&e));
+        let mut owner_tokens: Vec<u32> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::OwnerTokens(owner.clone()))
+            .unwrap_or(Vec::new(&e));
         owner_tokens.push_back(token_id);
-        e.storage().persistent().set(&DataKey::OwnerTokens(owner.clone()), &owner_tokens);
+        e.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(owner.clone()), &owner_tokens);
 
         // Add token_id to the list of all tokens
-        let mut token_ids: Vec<u32> = e.storage().instance().get(&DataKey::TokenIds).unwrap_or(Vec::new(&e));
+        let mut token_ids: Vec<u32> = e
+            .storage()
+            .instance()
+            .get(&DataKey::TokenIds)
+            .unwrap_or(Vec::new(&e));
         token_ids.push_back(token_id);
         e.storage().instance().set(&DataKey::TokenIds, &token_ids);
 
         // Clear reentrancy guard
-        e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+        e.storage()
+            .instance()
+            .set(&DataKey::ReentrancyGuard, &false);
 
         // Emit mint event
         e.events().publish(
@@ -349,7 +469,6 @@ impl CommitmentNFTContract {
             .ok_or(ContractError::TokenNotFound)
     }
 
-
     /// Get owner of NFT
     pub fn owner_of(e: Env, token_id: u32) -> Result<Address, ContractError> {
         let nft: CommitmentNFT = e
@@ -362,21 +481,28 @@ impl CommitmentNFTContract {
     }
 
     /// Transfer NFT to new owner
-    /// 
+    ///
     /// # Reentrancy Protection
     /// Uses checks-effects-interactions pattern. This function only writes to storage
     /// and doesn't make external calls, but still protected for consistency.
-    pub fn transfer(e: Env, from: Address, to: Address, token_id: u32) -> Result<(), ContractError> {
+    pub fn transfer(
+        e: Env,
+        from: Address,
+        to: Address,
+        token_id: u32,
+    ) -> Result<(), ContractError> {
         // Reentrancy protection
-        let guard: bool = e.storage()
+        let guard: bool = e
+            .storage()
             .instance()
             .get(&DataKey::ReentrancyGuard)
             .unwrap_or(false);
-        
+
         if guard {
             return Err(ContractError::ReentrancyDetected);
         }
         e.storage().instance().set(&DataKey::ReentrancyGuard, &true);
+        EmergencyControl::require_not_emergency(&e);
 
         // Check if contract is paused
         Pausable::require_not_paused(&e);
@@ -384,29 +510,41 @@ impl CommitmentNFTContract {
         // CHECKS: Require authorization from the sender
         from.require_auth();
 
+        // Validate 'to' address is not the same as 'from' (prevent self-transfer)
+        if to == from {
+            e.storage()
+                .instance()
+                .set(&DataKey::ReentrancyGuard, &false);
+            return Err(ContractError::TransferToZeroAddress);
+        }
+
         // Get the NFT
         let mut nft: CommitmentNFT = e
             .storage()
             .persistent()
             .get(&DataKey::NFT(token_id))
             .ok_or_else(|| {
-                e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+                e.storage()
+                    .instance()
+                    .set(&DataKey::ReentrancyGuard, &false);
                 ContractError::TokenNotFound
             })?;
 
         // Verify ownership
         if nft.owner != from {
-            e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+            e.storage()
+                .instance()
+                .set(&DataKey::ReentrancyGuard, &false);
             return Err(ContractError::NotOwner);
         }
 
-        // Check if NFT is still active (active NFTs may have transfer restrictions)
-        // For now, we allow transfers regardless of active status
-        // Uncomment below to restrict transfers of active NFTs:
-        // if nft.is_active {
-        //     e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
-        //     return Err(ContractError::TransferNotAllowed);
-        // }
+        // Check if NFT is active (locked) - active commitments cannot be transferred
+        if nft.is_active {
+            e.storage()
+                .instance()
+                .set(&DataKey::ReentrancyGuard, &false);
+            return Err(ContractError::NFTLocked);
+        }
 
         // EFFECTS: Update state
         // Update owner
@@ -415,30 +553,56 @@ impl CommitmentNFTContract {
 
         // OPTIMIZATION: Batch read balances before updating
         let (from_balance, to_balance) = {
-            let from_bal = e.storage().persistent().get(&DataKey::OwnerBalance(from.clone())).unwrap_or(0u32);
-            let to_bal = e.storage().persistent().get(&DataKey::OwnerBalance(to.clone())).unwrap_or(0u32);
+            let from_bal = e
+                .storage()
+                .persistent()
+                .get(&DataKey::OwnerBalance(from.clone()))
+                .unwrap_or(0u32);
+            let to_bal = e
+                .storage()
+                .persistent()
+                .get(&DataKey::OwnerBalance(to.clone()))
+                .unwrap_or(0u32);
             (from_bal, to_bal)
         };
-        
+
         // Update balance counts
         if from_balance > 0 {
-            e.storage().persistent().set(&DataKey::OwnerBalance(from.clone()), &(from_balance - 1));
+            e.storage()
+                .persistent()
+                .set(&DataKey::OwnerBalance(from.clone()), &(from_balance - 1));
         }
-        e.storage().persistent().set(&DataKey::OwnerBalance(to.clone()), &(to_balance + 1));
+        e.storage()
+            .persistent()
+            .set(&DataKey::OwnerBalance(to.clone()), &(to_balance + 1));
 
         // Update owner tokens lists
-        let mut from_tokens: Vec<u32> = e.storage().persistent().get(&DataKey::OwnerTokens(from.clone())).unwrap_or(Vec::new(&e));
+        let mut from_tokens: Vec<u32> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::OwnerTokens(from.clone()))
+            .unwrap_or(Vec::new(&e));
         if let Some(index) = from_tokens.iter().position(|id| id == token_id) {
             from_tokens.remove(index as u32);
         }
-        e.storage().persistent().set(&DataKey::OwnerTokens(from.clone()), &from_tokens);
+        e.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(from.clone()), &from_tokens);
 
-        let mut to_tokens: Vec<u32> = e.storage().persistent().get(&DataKey::OwnerTokens(to.clone())).unwrap_or(Vec::new(&e));
+        let mut to_tokens: Vec<u32> = e
+            .storage()
+            .persistent()
+            .get(&DataKey::OwnerTokens(to.clone()))
+            .unwrap_or(Vec::new(&e));
         to_tokens.push_back(token_id);
-        e.storage().persistent().set(&DataKey::OwnerTokens(to.clone()), &to_tokens);
+        e.storage()
+            .persistent()
+            .set(&DataKey::OwnerTokens(to.clone()), &to_tokens);
 
         // Clear reentrancy guard
-        e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+        e.storage()
+            .instance()
+            .set(&DataKey::ReentrancyGuard, &false);
 
         // Emit transfer event
         e.events().publish(
@@ -462,7 +626,10 @@ impl CommitmentNFTContract {
 
     /// Get total supply of NFTs minted
     pub fn total_supply(e: Env) -> u32 {
-        e.storage().instance().get(&DataKey::TokenCounter).unwrap_or(0)
+        e.storage()
+            .instance()
+            .get(&DataKey::TokenCounter)
+            .unwrap_or(0)
     }
 
     /// Get NFT count for a specific owner
@@ -484,7 +651,11 @@ impl CommitmentNFTContract {
         let mut nfts: Vec<CommitmentNFT> = Vec::new(&e);
 
         for token_id in token_ids.iter() {
-            if let Some(nft) = e.storage().persistent().get::<DataKey, CommitmentNFT>(&DataKey::NFT(token_id)) {
+            if let Some(nft) = e
+                .storage()
+                .persistent()
+                .get::<DataKey, CommitmentNFT>(&DataKey::NFT(token_id))
+            {
                 nfts.push_back(nft);
             }
         }
@@ -503,7 +674,11 @@ impl CommitmentNFTContract {
         let mut owned_nfts: Vec<CommitmentNFT> = Vec::new(&e);
 
         for token_id in token_ids.iter() {
-            if let Some(nft) = e.storage().persistent().get::<DataKey, CommitmentNFT>(&DataKey::NFT(token_id)) {
+            if let Some(nft) = e
+                .storage()
+                .persistent()
+                .get::<DataKey, CommitmentNFT>(&DataKey::NFT(token_id))
+            {
                 owned_nfts.push_back(nft);
             }
         }
@@ -516,21 +691,23 @@ impl CommitmentNFTContract {
     // ========================================================================
 
     /// Mark NFT as settled (after maturity)
-    /// 
+    ///
     /// # Reentrancy Protection
     /// Uses checks-effects-interactions pattern. This function only writes to storage
     /// and doesn't make external calls, but still protected for consistency.
     pub fn settle(e: Env, token_id: u32) -> Result<(), ContractError> {
         // Reentrancy protection
-        let guard: bool = e.storage()
+        let guard: bool = e
+            .storage()
             .instance()
             .get(&DataKey::ReentrancyGuard)
             .unwrap_or(false);
-        
+
         if guard {
             return Err(ContractError::ReentrancyDetected);
         }
         e.storage().instance().set(&DataKey::ReentrancyGuard, &true);
+        EmergencyControl::require_not_emergency(&e);
 
         // Check if contract is paused
         Pausable::require_not_paused(&e);
@@ -541,20 +718,26 @@ impl CommitmentNFTContract {
             .persistent()
             .get(&DataKey::NFT(token_id))
             .ok_or_else(|| {
-                e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+                e.storage()
+                    .instance()
+                    .set(&DataKey::ReentrancyGuard, &false);
                 ContractError::TokenNotFound
             })?;
 
         // Check if already settled
         if !nft.is_active {
-            e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+            e.storage()
+                .instance()
+                .set(&DataKey::ReentrancyGuard, &false);
             return Err(ContractError::AlreadySettled);
         }
 
         // Verify the commitment has expired
         let current_time = e.ledger().timestamp();
         if current_time < nft.metadata.expires_at {
-            e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+            e.storage()
+                .instance()
+                .set(&DataKey::ReentrancyGuard, &false);
             return Err(ContractError::NotExpired);
         }
 
@@ -564,13 +747,13 @@ impl CommitmentNFTContract {
         e.storage().persistent().set(&DataKey::NFT(token_id), &nft);
 
         // Clear reentrancy guard
-        e.storage().instance().set(&DataKey::ReentrancyGuard, &false);
+        e.storage()
+            .instance()
+            .set(&DataKey::ReentrancyGuard, &false);
 
         // Emit settle event
-        e.events().publish(
-            (symbol_short!("Settle"), token_id),
-            e.ledger().timestamp(),
-        );
+        e.events()
+            .publish((symbol_short!("Settle"), token_id), e.ledger().timestamp());
 
         Ok(())
     }
@@ -591,6 +774,51 @@ impl CommitmentNFTContract {
     pub fn token_exists(e: Env, token_id: u32) -> bool {
         e.storage().persistent().has(&DataKey::NFT(token_id))
     }
+
+    /// Set emergency mode (admin only)
+    pub fn set_emergency_mode(e: Env, caller: Address, enabled: bool) -> Result<(), ContractError> {
+        let admin: Address = e
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(ContractError::NotInitialized)?;
+        admin.require_auth();
+
+        if caller != admin {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        EmergencyControl::set_emergency_mode(&e, enabled);
+        Ok(())
+    }
+}
+
+fn read_version(e: &Env) -> u32 {
+    e.storage()
+        .instance()
+        .get::<_, u32>(&DataKey::Version)
+        .unwrap_or(0)
+}
+
+fn require_admin(e: &Env, caller: &Address) -> Result<(), ContractError> {
+    caller.require_auth();
+    let admin: Address = e
+        .storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .ok_or(ContractError::NotInitialized)?;
+    if *caller != admin {
+        return Err(ContractError::NotAuthorized);
+    }
+    Ok(())
+}
+
+fn require_valid_wasm_hash(e: &Env, wasm_hash: &BytesN<32>) -> Result<(), ContractError> {
+    let zero = BytesN::from_array(e, &[0; 32]);
+    if *wasm_hash == zero {
+        return Err(ContractError::InvalidWasmHash);
+    }
+    Ok(())
 }
 
 #[cfg(all(test, feature = "benchmark"))]

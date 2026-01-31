@@ -168,6 +168,14 @@
                                   },
                                   {
                                     "key": {
+                                      "symbol": "grace_period_days"
+                                    },
+                                    "val": {
+                                      "u32": 3
+                                    }
+                                  },
+                                  {
+                                    "key": {
                                       "symbol": "max_loss_percent"
                                     },
                                     "val": {
@@ -203,6 +211,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "CreationFeeBps"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "NftContract"
                             }
                           ]
@@ -228,6 +248,24 @@
                           "vec": [
                             {
                               "symbol": "TotalValueLocked"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "i128": {
+                            "hi": 0,
+                            "lo": 1100
+                          }
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "TotalValueLockedByAsset"
+                            },
+                            {
+                              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                             }
                           ]
                         },
@@ -446,6 +484,14 @@
                         },
                         "val": {
                           "u32": 10
+                        }
+                      },
+                      {
+                        "key": {
+                          "symbol": "grace_period_days"
+                        },
+                        "val": {
+                          "u32": 3
                         }
                       },
                       {

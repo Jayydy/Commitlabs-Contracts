@@ -345,6 +345,67 @@ fn test_get_attestations_empty() {
 }
 
 #[test]
+fn test_get_attestations_pagination() {
+    let (e, admin, commitment_core, contract_id) = setup_test_env();
+    let commitment_id = String::from_str(&e, "pagetest");
+    let owner = Address::generate(&e);
+    store_core_commitment(
+        &e,
+        &commitment_core,
+        "pagetest",
+        &owner,
+        1000,
+        1000,
+        10,
+        30,
+        1000,
+    );
+
+    // insert five small attestations
+    for _ in 0..5 {
+        e.as_contract(&contract_id, || {
+            AttestationEngineContract::attest(
+                e.clone(),
+                admin.clone(),
+                commitment_id.clone(),
+                String::from_str(&e, "health_check"),
+                Map::new(&e),
+                true,
+            )
+            .unwrap();
+        });
+    }
+
+    // offset 1 limit 2 should return two entries
+    let page = e.as_contract(&contract_id, || {
+        AttestationEngineContract::get_attestations_page(
+            e.clone(),
+            commitment_id.clone(),
+            1,
+            2,
+        )
+    });
+    assert_eq!(page.len(), 2);
+
+    // compare with baseline
+    let all = e.as_contract(&contract_id, || {
+        AttestationEngineContract::get_attestations(e.clone(), commitment_id.clone())
+    });
+    assert_eq!(page.get(0).unwrap(), all.get(1).unwrap());
+
+    // request past end returns empty
+    let empty_page = e.as_contract(&contract_id, || {
+        AttestationEngineContract::get_attestations_page(
+            e.clone(),
+            commitment_id.clone(),
+            10,
+            5,
+        )
+    });
+    assert_eq!(empty_page.len(), 0);
+}
+
+#[test]
 fn test_get_health_metrics_basic() {
     let (e, _admin, _commitment_core, contract_id) = setup_test_env();
 
@@ -1720,6 +1781,38 @@ fn test_record_drawdown_event() {
     // (drawdown_percent, is_compliant, timestamp)
     assert_eq!(event_data.0, 5);
     assert_eq!(event_data.1, true);
+}
+
+#[test]
+fn test_record_drawdown_violation_event() {
+    let (e, admin, commitment_core, contract_id) = setup_test_env();
+    e.mock_all_auths();
+    let client = AttestationEngineContractClient::new(&e, &contract_id);
+
+    let commitment_id = String::from_str(&e, "viol_id");
+    let owner = Address::generate(&e);
+    store_core_commitment(
+        &e,
+        &commitment_core,
+        "viol_id",
+        &owner,
+        1000,
+        900,
+        5, // max_loss_percent = 5%
+        30,
+        1000,
+    );
+
+    // drawdown_percent > max_loss => violation
+    client.record_drawdown(&admin, &commitment_id, &10);
+
+    let events = e.events().all();
+    // Expect two events: ViolationDetected then DrawdownRecorded
+    assert!(events.len() >= 2);
+    let first = &events[events.len() - 2];
+    assert_eq!(first.1[1], Symbol::new(&e, "ViolationDetected").into_val(&e));
+    let second = events.last().unwrap();
+    assert_eq!(second.1[1], Symbol::new(&e, "DrawdownRecorded").into_val(&e));
 }
 
 #[test]

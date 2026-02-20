@@ -126,34 +126,10 @@ pub struct Commitment {
     pub status: String, // "active", "settled", "violated", "early_exit"
 }
 
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum DataKey {
-    Admin,
-    CommitmentCore,
-    HealthState(String),
-    Attestations(String),
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HealthState {
-    pub fees_generated: i128,
-    pub volatility_exposure: i128,
-    pub last_attestation: u64,
-    pub compliance_score: u32, // 0-100; 0 means "unknown / not calculated"
-}
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Attestation {
-    pub commitment_id: String,
-    pub timestamp: u64,
-    pub attestation_type: String, // "health_check", "violation", "fee_generation", "drawdown"
-    pub data: Map<String, String>, // Flexible data structure
-    pub is_compliant: bool,
-    pub verified_by: Address,
-}
+// Duplicate definitions removed.  HealthState and the small DataKey
+// variant were legacy leftovers; the first `DataKey` and `Attestation`
+// structs earlier in the file are the authoritative versions.  The
+// health metrics helper later will load `HealthMetrics` directly instead.
 
 // Import Commitment types from commitment_core (define locally for cross-contract calls)
 
@@ -439,6 +415,64 @@ fn is_authorized_verifier(e: &Env, address: &Address) -> bool {
     pub fn get_stored_health_metrics(e: Env, commitment_id: String) -> Option<HealthMetrics> {
         let key = DataKey::HealthMetrics(commitment_id);
         e.storage().persistent().get(&key)
+    }
+
+    // ========================================================================
+    // Storage helpers
+    // ========================================================================
+
+    /// Derive the storage key for the attestations list of a commitment.
+    fn attestations_key(commitment_id: &String) -> DataKey {
+        DataKey::Attestations(commitment_id.clone())
+    }
+
+    /// Derive the storage key for health metrics of a commitment.
+    fn health_metrics_key(commitment_id: &String) -> DataKey {
+        DataKey::HealthMetrics(commitment_id.clone())
+    }
+
+    /// Load all attestations for a commitment; returns empty vector when
+    /// none are present (avoids repeated boilerplate).
+    fn load_attestations(e: &Env, commitment_id: &String) -> Vec<Attestation> {
+        e.storage()
+            .persistent()
+            .get(&Self::attestations_key(commitment_id))
+            .unwrap_or_else(|| Vec::new(e))
+    }
+
+    /// Store an attestation vector for a commitment.
+    fn store_attestations(
+        e: &Env,
+        commitment_id: &String,
+        attestations: &Vec<Attestation>,
+    ) {
+        e.storage()
+            .persistent()
+            .set(&Self::attestations_key(commitment_id), attestations);
+    }
+
+    /// Store health metrics for a commitment.
+    fn store_health_metrics(e: &Env, metrics: &HealthMetrics) {
+        e.storage()
+            .persistent()
+            .set(&Self::health_metrics_key(&metrics.commitment_id), metrics);
+    }
+
+    /// Retrieve stored health metrics or return a default value if missing.
+    fn get_health_state_or_default(e: &Env, commitment_id: &String) -> HealthMetrics {
+        e.storage()
+            .persistent()
+            .get(&Self::health_metrics_key(commitment_id))
+            .unwrap_or_else(|| HealthMetrics {
+                commitment_id: commitment_id.clone(),
+                current_value: 0,
+                initial_value: 0,
+                drawdown_percent: 0,
+                fees_generated: 0,
+                volatility_exposure: 0,
+                last_attestation: 0,
+                compliance_score: 100,
+            })
     }
 
     // ========================================================================
@@ -734,19 +768,10 @@ fn is_authorized_verifier(e: &Env, address: &Address) -> bool {
             is_compliant: true, // Default to true, can be updated by logic
         };
 
-        // 9. Store attestation in commitment's list
-        let key = DataKey::Attestations(commitment_id.clone());
-        let mut attestations: Vec<Attestation> = e
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| Vec::new(&e));
-
-        // Add new attestation
+        // 9. Store attestation in commitment's list using helper
+        let mut attestations = Self::load_attestations(&e, &commitment_id);
         attestations.push_back(attestation);
-
-        // Store updated list
-        e.storage().persistent().set(&key, &attestations);
+        Self::store_attestations(&e, &commitment_id, &attestations);
 
         // 10. Update health metrics
         Self::update_health_metrics(&e, &commitment_id, &attestation);
@@ -809,18 +834,36 @@ fn is_authorized_verifier(e: &Env, address: &Address) -> bool {
 
     /// Get all attestations for a commitment
     pub fn get_attestations(e: Env, commitment_id: String) -> Vec<Attestation> {
-        // Retrieve attestations from persistent storage using commitment_id as key
-        let key = DataKey::Attestations(commitment_id);
-        e.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| Vec::new(&e))
+        Self::load_attestations(&e, &commitment_id)
     }
 
     /// Get attestation count for a commitment
     pub fn get_attestation_count(e: Env, commitment_id: String) -> u64 {
         let key = DataKey::AttestationCounter(commitment_id);
         e.storage().persistent().get(&key).unwrap_or(0)
+    }
+
+    /// Read a slice of a commitment's attestation list. Useful when
+    /// the full vector is large; callers supply an `offset` and `limit`.
+    pub fn get_attestations_page(
+        e: Env,
+        commitment_id: String,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<Attestation> {
+        let all = Self::load_attestations(&e, &commitment_id);
+        let start = offset as usize;
+        if start >= all.len() {
+            return Vec::new(&e);
+        }
+        let end = core::cmp::min(start + limit as usize, all.len());
+        let mut page = Vec::new(&e);
+        for i in start..end {
+            if let Some(att) = all.get(i) {
+                page.push_back(att.clone());
+            }
+        }
+        page
     }
 
     /// Get current health metrics for a commitment
@@ -834,37 +877,10 @@ fn is_authorized_verifier(e: &Env, address: &Address) -> bool {
 
         let state = Self::get_health_state_or_default(&e, &commitment_id);
 
-        // Get commitment from core contract
-        let commitment_core: Address = e.storage().instance().get(&DataKey::CoreContract).unwrap();
-
-        // Call get_commitment on commitment_core contract
-        // Using Symbol::new() for function name longer than 9 characters
-        let mut args = Vec::new(&e);
-        args.push_back(commitment_id.clone().into_val(&e));
-        let commitment_val: Val =
-            e.invoke_contract(&commitment_core, &Symbol::new(&e, "get_commitment"), args);
-
-        // Convert Val to Commitment
-        let commitment: Commitment = commitment_val.try_into_val(&e).unwrap();
-
-        // Get all attestations
+        // we already fetched `commitment` above via the core client
+        // get all attestations
         let attestations = Self::get_attestations(e.clone(), commitment_id.clone());
-
-        // Extract values from commitment
-        let initial_value = commitment.amount; // Using amount as initial value
-        let current_value = commitment.current_value;
-
-        // Calculate drawdown percentage: ((initial - current) / initial) * 100
-        // Handle zero initial value to prevent division by zero
-        let drawdown_percent = if initial_value > 0 {
-            let diff = initial_value.checked_sub(current_value).unwrap_or(0);
-            diff.checked_mul(100)
-                .unwrap_or(0)
-                .checked_div(initial_value)
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        // (initial_value, current_value and drawdown_percent were computed earlier)
 
         // Sum fees from fee attestations
         // Extract fee_amount from data map where key is "fee_amount"
@@ -963,55 +979,6 @@ fn is_authorized_verifier(e: &Env, address: &Address) -> bool {
         loss_ok && duration_ok && fee_ok && overall_health_ok && !has_violations && status_ok
     }
 
-    /// Record fee generation
-    ///
-    /// # Arguments
-    /// * `commitment_id` - The commitment to verify
-    ///
-    /// # Returns
-    /// `true` if compliant, `false` otherwise
-    pub fn verify_compliance(e: Env, commitment_id: String) -> bool {
-        // Get commitment from core contract
-        let commitment_core: Address = match e.storage().instance().get(&DataKey::CoreContract) {
-            Some(addr) => addr,
-            None => return false,
-        };
-
-        // Get commitment details
-        let mut args = Vec::new(&e);
-        args.push_back(commitment_id.clone().into_val(&e));
-        let commitment_val: Val = match e.try_invoke_contract::<Val, soroban_sdk::Error>(
-            &commitment_core,
-            &Symbol::new(&e, "get_commitment"),
-            args,
-        ) {
-            Ok(Ok(val)) => val,
-            _ => return false,
-        };
-
-        let commitment: Commitment = match commitment_val.try_into_val(&e) {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-
-        // Get health metrics
-        let metrics = Self::get_health_metrics(e.clone(), commitment_id);
-
-        // Check compliance rules
-        let max_loss = commitment.rules.max_loss_percent as i128;
-
-        // Check if drawdown exceeds max loss
-        if metrics.drawdown_percent > max_loss {
-            return false;
-        }
-
-        // Check compliance score threshold (below 50 is non-compliant)
-        if metrics.compliance_score < 50 {
-            return false;
-        }
-
-        true
-    }
 
     /// Record fee generation
     ///
@@ -1034,43 +1001,19 @@ fn is_authorized_verifier(e: &Env, address: &Address) -> bool {
             Self::i128_to_string(&e, fee_amount),
         );
 
-        // Call attest with fee_generation type
+        // Delegate to attest which handles auth, storage and metrics.
         Self::attest(
             e.clone(),
-            caller,
+            caller.clone(),
             commitment_id.clone(),
             String::from_str(&e, "fee_generation"),
             data,
-            timestamp: e.ledger().timestamp(),
-            verified_by: caller.clone(),
-            is_compliant: true,
-        };
+            true,
+        )?;
 
-        // Store attestation
-        let atts_key = (symbol_short!("ATTS"), commitment_id.clone());
-        let mut attestations: Vec<Attestation> = e
-            .storage()
-            .persistent()
-            .get(&atts_key)
-            .unwrap_or_else(|| Vec::new(&e));
-        attestations.push_back(attestation);
-        e.storage().persistent().set(&atts_key, &attestations);
-        
-        // Recalculate compliance score (may call external contract)
-        metrics.compliance_score = Self::calculate_compliance_score(e.clone(), commitment_id.clone());
-        
-        // Update last attestation timestamp
-        metrics.last_attestation = e.ledger().timestamp();
-        
-        // Store updated health metrics
-        Self::store_health_metrics(&e, &metrics);
-        
-        // Clear reentrancy guard
-        e.storage().instance().set(&guard_key, &false);
-        
-        // Emit FeeRecorded event
+        // Emit event for easier indexing of fees
         e.events().publish(
-            (Symbol::new(&e, "FeeRecorded"), commitment_id),
+            (Symbol::new(&e, "FeeRecorded"), commitment_id.clone()),
             (fee_amount, e.ledger().timestamp()),
         );
 
@@ -1089,7 +1032,7 @@ fn is_authorized_verifier(e: &Env, address: &Address) -> bool {
         commitment_id: String,
         drawdown_percent: i128,
     ) -> Result<(), AttestationError> {
-        // Get commitment to check max_loss_percent
+        // fetch commitment to determine loss threshold
         let commitment_core: Address = e
             .storage()
             .instance()
@@ -1100,15 +1043,15 @@ fn is_authorized_verifier(e: &Env, address: &Address) -> bool {
         args.push_back(commitment_id.clone().into_val(&e));
         let commitment_val: Val =
             e.invoke_contract(&commitment_core, &Symbol::new(&e, "get_commitment"), args);
-
         let commitment: Commitment = commitment_val
             .try_into_val(&e)
             .map_err(|_| AttestationError::CommitmentNotFound)?;
 
         let max_loss = commitment.rules.max_loss_percent as i128;
-        let is_compliant = drawdown_percent <= max_loss;
+        let is_violation = drawdown_percent > max_loss;
+        let is_compliant = !is_violation;
 
-        // Build data map for drawdown attestation
+        // common data payload
         let mut data = Map::new(&e);
         data.set(
             String::from_str(&e, "drawdown_percent"),
@@ -1119,59 +1062,35 @@ fn is_authorized_verifier(e: &Env, address: &Address) -> bool {
             Self::i128_to_string(&e, max_loss),
         );
 
-            // Store violation attestation
-            let atts_key = (symbol_short!("ATTS"), commitment_id.clone());
-            let mut attestations: Vec<Attestation> = e
-                .storage()
-                .persistent()
-                .get(&atts_key)
-                .unwrap_or_else(|| Vec::new(&e));
-            attestations.push_back(violation_attestation);
-            e.storage().persistent().set(&atts_key, &attestations);
-
-            // Emit ViolationDetected event
+        // if violation, record a separate attestation and emit event
+        if is_violation {
+            Self::attest(
+                e.clone(),
+                caller.clone(),
+                commitment_id.clone(),
+                String::from_str(&e, "violation"),
+                data.clone(),
+                false,
+            )?;
             e.events().publish(
                 (Symbol::new(&e, "ViolationDetected"), commitment_id.clone()),
-                (drawdown_percent, max_loss_percent, e.ledger().timestamp()),
+                (drawdown_percent, max_loss, e.ledger().timestamp()),
             );
         }
-        
-        // Create drawdown attestation
-        let drawdown_data = Map::new(&e);
-        let drawdown_attestation = Attestation {
-            commitment_id: commitment_id.clone(),
-            attestation_type: String::from_str(&e, "drawdown"),
-            data: drawdown_data,
-            timestamp: e.ledger().timestamp(),
-            verified_by: caller.clone(),
-            is_compliant: !is_violation,
-        };
 
-        // Store drawdown attestation
-        let atts_key = (symbol_short!("ATTS"), commitment_id.clone());
-        let mut attestations: Vec<Attestation> = e
-            .storage()
-            .persistent()
-            .get(&atts_key)
-            .unwrap_or_else(|| Vec::new(&e));
-        attestations.push_back(drawdown_attestation);
-        e.storage().persistent().set(&atts_key, &attestations);
-        
-        // Recalculate compliance score (may call external contract)
-        metrics.compliance_score = Self::calculate_compliance_score(e.clone(), commitment_id.clone());
-        
-        // Update last attestation timestamp
-        metrics.last_attestation = e.ledger().timestamp();
-        
-        // Store updated health metrics
-        Self::store_health_metrics(&e, &metrics);
-        
-        // Clear reentrancy guard
-        e.storage().instance().set(&guard_key, &false);
-        
-        // Emit DrawdownRecorded event
+        // always record a drawdown attestation
+        Self::attest(
+            e.clone(),
+            caller.clone(),
+            commitment_id.clone(),
+            String::from_str(&e, "drawdown"),
+            data,
+            is_compliant,
+        )?;
+
+        // emit a dedicated drawdown event as before
         e.events().publish(
-            (Symbol::new(&e, "DrawdownRecorded"), commitment_id),
+            (Symbol::new(&e, "DrawdownRecorded"), commitment_id.clone()),
             (drawdown_percent, is_compliant, e.ledger().timestamp()),
         );
 
@@ -1586,13 +1505,9 @@ fn is_authorized_verifier(e: &Env, address: &Address) -> bool {
             };
 
             // Store attestation
-            let key = DataKey::Attestations(params.commitment_id.clone());
-            let mut attestations: Vec<Attestation> = e.storage()
-                .persistent()
-                .get(&key)
-                .unwrap_or_else(|| Vec::new(&e));
+            let mut attestations = Self::load_attestations(&e, &params.commitment_id);
             attestations.push_back(attestation.clone());
-            e.storage().persistent().set(&key, &attestations);
+            Self::store_attestations(&e, &params.commitment_id, &attestations);
 
             // Update health metrics
             Self::update_health_metrics(&e, &params.commitment_id, &attestation);
